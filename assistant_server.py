@@ -122,7 +122,7 @@ except ImportError:
 # =====================================================================
 # 1. PORTABLE PATHS, DIRECTORIES & PERSISTENT WORKSPACE CONFIG
 # =====================================================================
-APP_VERSION = "5.0"
+APP_VERSION = "5.1"
 SERVER_PORT = int(os.environ.get("AVS_PORT", "8000"))
 from avs import platform_bridge as avs_platform
 from avs import toolbox as avs_toolbox
@@ -6172,6 +6172,8 @@ MANAGED_PACKAGES = [
     {"pkg": "pillow", "mod": "PIL", "title": "🖼️ Pillow Image & Crop Studio", "desc": "Handles desktop screenshots, avatar/wallpaper cropping, and art.", "owner": "Jeffrey A. Clark & Contributors (HPND)"},
     {"pkg": "beautifulsoup4", "mod": "bs4", "title": "🕸️ BeautifulSoup4 Scraper", "desc": "Parses and cleans HTML web pages + Web Search Fallback.", "owner": "Leonard Richardson (MIT License)"},
     {"pkg": "psutil", "mod": "psutil", "title": "💻 PC Hardware Telemetry", "desc": "Monitors CPU cores, RAM, and disk metrics.", "owner": "Giampaolo Rodola (BSD-3-Clause)"},
+    {"pkg": "py-cpuinfo", "mod": "cpuinfo", "title": "🔬 Py-CPUInfo (SpecPulse Deep CPU)", "desc": "Reads exact CPU brand, architecture, and L2/L3 cache sizes for SpecPulse.", "owner": "Matthew Brennan Jones (MIT License)"},
+    {"pkg": "wmi", "mod": "wmi", "title": "🖥️ Windows WMI (SpecPulse Mobo/GPU)", "desc": "Reads Windows motherboard, BIOS, RAM DIMM slots, and live GPU 3D/VRAM counters.", "owner": "Tim Golden (MIT License)"},
     {"pkg": "scipy", "mod": "scipy", "title": "🔊 SciPy Audio & Signal Engine", "desc": "Encodes high-fidelity .wav audio for the Music Manager.", "owner": "SciPy Developers (BSD-3-Clause)"},
     {"pkg": "transformers", "mod": "transformers", "title": "🎵 HF Transformers (MusicGen Manager)", "desc": "Runs local Hugging Face MusicGen / Bark audio models via Cashier-to-Manager swap.", "owner": "Hugging Face Inc. (Apache-2.0)"},
     {"pkg": "diffusers", "mod": "diffusers", "title": "🎨 HF Diffusers (Local Image Manager)", "desc": "Runs local Hugging Face Tiny-SD / SD-Turbo image models via Cashier-to-Manager swap.", "owner": "Hugging Face Inc. (Apache-2.0)"},
@@ -6471,6 +6473,27 @@ def api_workbench_subprocess(payload: dict):
 def api_hardware_specs():
     """SpecPulse-inspired deep hardware inventory (64-bit Registry VRAM + WMI/psutil live telemetry)."""
     return avs_hw.get_full_hardware_report()
+
+@app.get("/specpulse", response_class=HTMLResponse)
+def serve_specpulse_dashboard():
+    """Serves the embedded SpecPulse 60-FPS Visual Hardware Telemetry & Benchmark Dashboard."""
+    return HTMLResponse(content=avs_hw.SPECPULSE_DASHBOARD_HTML)
+
+@app.get("/api/specpulse/specs")
+def api_specpulse_specs():
+    return avs_hw.get_cached_static_specs()
+
+@app.get("/api/specpulse/telemetry")
+def api_specpulse_telemetry():
+    return avs_hw.get_live_telemetry_payload()
+
+@app.post("/api/specpulse/benchmark/start")
+def api_specpulse_bench_start():
+    return avs_hw.start_benchmark(temp_dir=TEMP_SESSION_DIR)
+
+@app.get("/api/specpulse/benchmark/status")
+def api_specpulse_bench_status():
+    return avs_hw.get_benchmark_status()
 
 @app.get("/api/hf/inspect")
 def api_hf_inspect(repo: str = ""):

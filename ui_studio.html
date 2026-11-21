@@ -1069,6 +1069,7 @@
       <button class="secondary small-btn" style="flex:1;" onclick="openStudioModal('tab-backup')">📦 .ZIP / Import</button>
     </div>
     <div style="display:flex; gap:5px;">
+      <button class="secondary small-btn" style="flex:1;" onclick="openSpecPulseModal()" title="Open SpecPulse 60-FPS Hardware Monitor & Benchmark">📊 SpecPulse</button>
       <button class="secondary small-btn" style="flex:1;" onclick="openStudioModal('tab-manual')">📖 Manual</button>
       <button class="secondary small-btn" style="flex:1;" onclick="exportCurrentChatMd()" title="Download active chat session as Markdown (.md)">📝 Export .MD</button>
       <button class="secondary small-btn" style="flex:1;" onclick="openFolder('chat_logs')">📄 .txt Logs</button>
@@ -4857,6 +4858,34 @@ window.addEventListener('paste', (e) => {
 startBootResourceToast();
 refreshStatus();
 setInterval(refreshStatus, 2000);
+</script>
+
+<!-- SpecPulse On-Demand 60-FPS Hardware Telemetry Overlay (0% CPU when closed) -->
+<div id="specpulse-modal" style="display:none; position:fixed; inset:0; z-index:9999; background:rgba(5,8,16,0.88); backdrop-filter:blur(6px); padding:18px; box-sizing:border-box;">
+  <div style="width:100%; height:100%; max-width:1420px; margin:0 auto; display:flex; flex-direction:column; background:#070b14; border:1px solid rgba(56,189,248,0.35); border-radius:14px; overflow:hidden; box-shadow:0 24px 64px rgba(0,0,0,0.75);">
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 14px; background:#0c1322; border-bottom:1px solid rgba(56,189,248,0.2);">
+      <span style="font-size:13px; font-weight:700; color:#38bdf8; letter-spacing:0.6px;">📊 SPECPULSE :: LIVE HARDWARE TELEMETRY &amp; BENCHMARK</span>
+      <div style="display:flex; gap:8px;">
+        <a href="/specpulse" target="_blank" style="font-size:12px; color:#94a3b8; text-decoration:none; padding:4px 10px; border:1px solid #334155; border-radius:6px;">↗ Pop Out</a>
+        <button onclick="closeSpecPulseModal()" style="background:#3f1d28; color:#fca5a5; border:none; padding:4px 12px; border-radius:6px; cursor:pointer; font-weight:600;">✕ Close</button>
+      </div>
+    </div>
+    <iframe id="specpulse-frame" src="about:blank" style="flex:1; width:100%; border:none; background:#070b14;"></iframe>
+  </div>
+</div>
+<script>
+function openSpecPulseModal() {
+  const m = document.getElementById('specpulse-modal');
+  const f = document.getElementById('specpulse-frame');
+  if (f && f.src !== location.origin + '/specpulse') f.src = '/specpulse';
+  if (m) m.style.display = 'block';
+}
+function closeSpecPulseModal() {
+  const m = document.getElementById('specpulse-modal');
+  const f = document.getElementById('specpulse-frame');
+  if (m) m.style.display = 'none';
+  if (f) f.src = 'about:blank';
+}
 </script>
 </body>
 </html>
