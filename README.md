@@ -5,7 +5,7 @@
 ## Quick Start (3-File Bootstrapper)
 1. Download `Launch.bat` (Windows), `Launch.sh` (macOS/Linux), and `manager.py` into any folder.
 2. Double-click `Launch.bat` (or run `./Launch.sh`).
-3. In the Manager Console, link your repo with `/repo <your_username>/AetherVault-Studio` and run `/update` anytime.
+3. In the Manager Console, run `/update` anytime for the latest version.
 
 ## Manager Console Slash-Commands
 - `/help` — Show all commands
