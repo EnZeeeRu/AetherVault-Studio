@@ -1,0 +1,22 @@
+{
+  "version": "5.0",
+  "updated_at": "2026-11-21",
+  "files": {
+    "Launch.bat": "96b651bcdeac5666ec2c0c7a9b1f29a5a92885aa20838b3dcfa3470398686dd5",
+    "Launch.sh": "59134e9d65ab17621b61df7909b395f5313b1f04278c8982daeafe8497a7b051",
+    "manager.py": "00f906f2efc5deb12e3dec263b7829ecd1fde18e3ce2a0fee0eae2b00c0d02a2",
+    "Manager.ps1": "0e0cdf30c93f5cd538acee46ed85c0c3862479ff4db5e3de421edd53e51ff785",
+    "Windows_Defender_Patch.bat": "c19a5b346d844ac9472e65911384a12cf8af47bb351c64896ed4b991e4662da5",
+    "assistant_server.py": "90a314a8cb0aaa536db57283619410e392c30905cec519a0b9f618f8228d0197",
+    "ui_studio.html": "5fc921ac80b2f260b4772e5173f4b8ad2aedf4ba61569bf0464e20e701ec0698",
+    "aethervault_logo.svg": "83252944100dff39d7b1e7a2347c1badbb839d5faf7d6d21c90d895210df322c",
+    "AetherVault_Studio_Manual.pdf": "0965cb6d3fbf7010f455c2e5cfd1bf345afd7a4662e9fd507837b0768605d7a9",
+    "avs/__init__.py": "3d6d0882d598a5e5b9d2ac37242d3467692d1a2220a89d716bc88cdbef7ec044",
+    "avs/platform_bridge.py": "68b827e8b28d766988e92c0110f2c1916424f6c477378ed6fd058d71111995f7",
+    "avs/toolbox.py": "ca40103578f9b692da910e8fe4f9aa9e6e63b5e15f9d1ee1c905e691c2b173d6",
+    "avs/workbench.py": "944acdbfbbf08e9091eae2e93cc402a2128aa42ac951497ed5046b881cfd9f85",
+    "avs/hardware_monitor.py": "7ecd18ba5cea0e383cea4681fbe2305202f3bd89e354d0b5d521ba71dcd030f8",
+    "custom_tools/README.md": "b87549c6fea62448b0e8f28e3e13dfcd11be3c7e093f2cbe1a6ff3e0a3eb775d",
+    "tests/smoke.py": "7b3fb748cc632c68c5bd2cf9caf5f4624aad37ddab0eea86ed9dcf953f26e048"
+  }
+}
