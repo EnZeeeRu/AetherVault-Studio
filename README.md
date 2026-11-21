@@ -18,3 +18,6 @@
 - `/pip <pkg>` — Install any custom PyPI library into `.venv`
 - `/log [keyword] [lines]` — Tail `error_audit.log` locally
 - `/repo <user/repo>` & `/update` — 1-click GitHub OTA sync
+
+## Download the Launcher and the Manager
+https://github.com/EnZeeeRu/AetherVault-Studio/releases/tag/Evergreen
