@@ -309,8 +309,7 @@ DEFAULT_CONFIG = {
     "workbench_trust": "safe_auto",
     "auto_web_search": True,
     "unrestricted_tokens": True,
-    "mcp_auth_token": "",
-    "github_repo": ""
+    "mcp_auth_token": ""
 }
 
 def load_workspace_config() -> dict:

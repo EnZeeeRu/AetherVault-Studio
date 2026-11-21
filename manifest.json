@@ -1,13 +1,14 @@
 {
   "version": "5.0",
+  "repo": "EnZeeeRu/AetherVault-Studio",
   "updated_at": "2026-11-21",
   "files": {
     "Launch.bat": "96b651bcdeac5666ec2c0c7a9b1f29a5a92885aa20838b3dcfa3470398686dd5",
     "Launch.sh": "59134e9d65ab17621b61df7909b395f5313b1f04278c8982daeafe8497a7b051",
-    "manager.py": "00f906f2efc5deb12e3dec263b7829ecd1fde18e3ce2a0fee0eae2b00c0d02a2",
+    "manager.py": "eac5c0858dbbcf1e507cf947847e0d44f63e5b6cb28a698492b6ad24d4d647fc",
     "Manager.ps1": "0e0cdf30c93f5cd538acee46ed85c0c3862479ff4db5e3de421edd53e51ff785",
     "Windows_Defender_Patch.bat": "c19a5b346d844ac9472e65911384a12cf8af47bb351c64896ed4b991e4662da5",
-    "assistant_server.py": "90a314a8cb0aaa536db57283619410e392c30905cec519a0b9f618f8228d0197",
+    "assistant_server.py": "65851f0f0ed230556ef2be6fa57ad7bb5f5e3c34d003b40c47a1ed58740179b6",
     "ui_studio.html": "5fc921ac80b2f260b4772e5173f4b8ad2aedf4ba61569bf0464e20e701ec0698",
     "aethervault_logo.svg": "83252944100dff39d7b1e7a2347c1badbb839d5faf7d6d21c90d895210df322c",
     "AetherVault_Studio_Manual.pdf": "0965cb6d3fbf7010f455c2e5cfd1bf345afd7a4662e9fd507837b0768605d7a9",
