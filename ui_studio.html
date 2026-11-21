@@ -1071,9 +1071,11 @@
     <div style="display:flex; gap:5px;">
       <button class="secondary small-btn" style="flex:1;" onclick="openSpecPulseModal()" title="Open SpecPulse 60-FPS Hardware Monitor & Benchmark">📊 SpecPulse</button>
       <button class="secondary small-btn" style="flex:1;" onclick="openStudioModal('tab-manual')">📖 Manual</button>
-      <button class="secondary small-btn" style="flex:1;" onclick="exportCurrentChatMd()" title="Download active chat session as Markdown (.md)">📝 Export .MD</button>
-      <button class="secondary small-btn" style="flex:1;" onclick="openFolder('chat_logs')">📄 .txt Logs</button>
-      <button class="secondary small-btn" style="flex:1;" onclick="openStudioModal('tab-about')">🇦🇷 About</button>
+    </div>
+    <div style="display:flex; gap:5px;">
+      <button class="secondary small-btn" style="flex:1;" onclick="exportCurrentChatMd()" title="Download active chat session as Markdown (.md)">📝 .MD</button>
+      <button class="secondary small-btn" style="flex:1;" onclick="openFolder('chat_logs')">📄 Logs</button>
+      <button class="secondary small-btn" style="flex:1;" onclick="openStudioModal('tab-about')"><svg viewBox="0 0 18 12" width="15" height="10" style="vertical-align:-1px; border-radius:2px; box-shadow:0 0 2px rgba(0,0,0,0.4);" aria-label="Argentina"><rect width="18" height="4" y="0" fill="#74ACDF"/><rect width="18" height="4" y="4" fill="#FFFFFF"/><rect width="18" height="4" y="8" fill="#74ACDF"/><circle cx="9" cy="6" r="1.4" fill="#F6B40E"/></svg> About</button>
     </div>
     <button class="secondary small-btn" style="width:100%; border-color:#ef4444; color:#fca5a5; margin-top:2px;" onclick="triggerSafeShutdown()" title="Save all memories/configs, wipe local .temp_cache, and shut down server safely">🛑 Safe Save & Shutdown</button>
   </div>
@@ -1154,7 +1156,10 @@
   <div class="card">
     <div class="card-header" style="margin-bottom:4px;">
       <h3>📊 Live SVG Hardware HUD</h3>
-      <button class="secondary small-btn" onclick="openStudioModal('tab-diagnostics')" title="Open Bugfixing, Sandbox & Self-Heal Studio">🛠️ Bugfix & Sandbox</button>
+      <div style="display:flex; gap:4px;">
+        <button class="small-btn" onclick="openSpecPulseModal()" title="Open Full SpecPulse 60-FPS Hardware Monitor & Benchmark">📊 SpecPulse</button>
+        <button class="secondary small-btn" onclick="openStudioModal('tab-diagnostics')" title="Open Bugfixing, Sandbox & Self-Heal Studio">🛠️ Bugfix</button>
+      </div>
     </div>
     <div class="svg-hud-grid">
       <div class="svg-gauge-box">
@@ -1352,7 +1357,7 @@
       <button class="tab-btn" onclick="switchModalTab('tab-integrations', this)">🔌 OSWorld, Telegram & Spotify</button>
       <button class="tab-btn" onclick="switchModalTab('tab-diagnostics', this)">🛠️ Bugfixing, Sandbox & Self-Heal</button>
       <button class="tab-btn" onclick="switchModalTab('tab-manual', this)">📖 Built-In Manual</button>
-      <button class="tab-btn" onclick="switchModalTab('tab-about', this)">🇦🇷 About & Copyrights</button>
+      <button class="tab-btn" onclick="switchModalTab('tab-about', this)"><svg viewBox="0 0 18 12" width="15" height="10" style="vertical-align:-1px; border-radius:2px; box-shadow:0 0 2px rgba(0,0,0,0.4);" aria-label="Argentina"><rect width="18" height="4" y="0" fill="#74ACDF"/><rect width="18" height="4" y="4" fill="#FFFFFF"/><rect width="18" height="4" y="8" fill="#74ACDF"/><circle cx="9" cy="6" r="1.4" fill="#F6B40E"/></svg> About & Copyrights</button>
     </div>
 
     <div class="modal-body">
@@ -1865,7 +1870,7 @@ print("Sandbox working dir:", os.getcwd())</textarea>
         <div class="credit-banner">
           <div style="display:flex; justify-content:center; margin-bottom:8px;"><img src="/logo.svg" style="width:76px; height:76px;" alt="AVS Logo"></div><h2 style="margin:0 0 6px 0; color:#fff;">AetherVault Studio v4.20 (AVS)</h2>
           <div style="font-size:0.92rem; font-weight:600; color:var(--accent-soft);">
-            🇦🇷 Made with ❤️ in Argentina by Enzeru, with the collaboration of Google Gemini.
+            <svg viewBox="0 0 18 12" width="15" height="10" style="vertical-align:-1px; border-radius:2px; box-shadow:0 0 2px rgba(0,0,0,0.4);" aria-label="Argentina"><rect width="18" height="4" y="0" fill="#74ACDF"/><rect width="18" height="4" y="4" fill="#FFFFFF"/><rect width="18" height="4" y="8" fill="#74ACDF"/><circle cx="9" cy="6" r="1.4" fill="#F6B40E"/></svg> Made with ❤️ in Argentina by Enzeru, with the collaboration of Google Gemini.
           </div>
           <div style="font-size:0.75rem; color:#9ca3af; margin-top:4px;">
             Standalone Open-Source Portable Local AI Environment • Reflex Fast-Gear • OSWorld Desktop Agent
