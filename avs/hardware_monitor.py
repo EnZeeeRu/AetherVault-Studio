@@ -882,6 +882,17 @@ let nodes = [];
 const particles = Array.from({ length: 28 }, (_, i) => ({ bus: i % 4, t: Math.random(), speed: 0.004 + Math.random() * 0.006 }));
 
 function layoutNodes(w, h) {
+  const isNarrow = (w / (window.devicePixelRatio || 1)) < 520;
+  if (isNarrow) {
+    nodes = [
+      { id: 'MOBO',    x: w * 0.04, y: h * 0.07, w: w * 0.27, h: h * 0.25, color: '#64748b' },
+      { id: 'CPU',     x: w * 0.365, y: h * 0.07, w: w * 0.27, h: h * 0.25, color: '#38bdf8' },
+      { id: 'RAM',     x: w * 0.69, y: h * 0.07, w: w * 0.27, h: h * 0.25, color: '#10b981' },
+      { id: 'GPU',     x: w * 0.06, y: h * 0.56, w: w * 0.41, h: h * 0.28, color: '#a855f7' },
+      { id: 'STORAGE', x: w * 0.53, y: h * 0.56, w: w * 0.41, h: h * 0.28, color: '#f59e0b' },
+    ];
+    return;
+  }
   nodes = [
     { id: 'CPU',     x: w * 0.34, y: h * 0.16, w: w * 0.22, h: h * 0.32, color: '#38bdf8' },
     { id: 'RAM',     x: w * 0.66, y: h * 0.14, w: w * 0.24, h: h * 0.28, color: '#10b981' },
@@ -949,10 +960,14 @@ function drawSchematic(ts) {
     const barW = (n.w - 16 * devicePixelRatio) * (load / 100);
     schCtx.fillStyle = n.color + 'aa';
     schCtx.fillRect(n.x + 8 * devicePixelRatio, n.y + n.h - 10 * devicePixelRatio, barW, 4 * devicePixelRatio);
-    schCtx.fillStyle = '#e2e8f0'; schCtx.font = `700 ${13 * devicePixelRatio}px Segoe UI, sans-serif`;
-    schCtx.fillText(n.id, n.x + 12 * devicePixelRatio, n.y + 24 * devicePixelRatio);
-    schCtx.fillStyle = n.color; schCtx.font = `600 ${12 * devicePixelRatio}px Segoe UI, sans-serif`;
-    schCtx.fillText(labels[n.id], n.x + 12 * devicePixelRatio, n.y + 44 * devicePixelRatio);
+    const compact = (w / (window.devicePixelRatio || 1)) < 520;
+    const fTitle = (compact ? 10.5 : 13) * devicePixelRatio;
+    const fSub = (compact ? 9.5 : 12) * devicePixelRatio;
+    const padX = (compact ? 8 : 12) * devicePixelRatio;
+    schCtx.fillStyle = '#e2e8f0'; schCtx.font = `700 ${fTitle}px Segoe UI, sans-serif`;
+    schCtx.fillText(n.id, n.x + padX, n.y + 22 * devicePixelRatio);
+    schCtx.fillStyle = n.color; schCtx.font = `600 ${fSub}px Segoe UI, sans-serif`;
+    schCtx.fillText(compact && n.id === 'MOBO' ? 'BIOS' : labels[n.id], n.x + padX, n.y + 40 * devicePixelRatio);
   });
   requestAnimationFrame(drawSchematic);
 }

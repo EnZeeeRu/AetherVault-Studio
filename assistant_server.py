@@ -122,7 +122,7 @@ except ImportError:
 # =====================================================================
 # 1. PORTABLE PATHS, DIRECTORIES & PERSISTENT WORKSPACE CONFIG
 # =====================================================================
-APP_VERSION = "5.1"
+APP_VERSION = "5.4"
 SERVER_PORT = int(os.environ.get("AVS_PORT", "8000"))
 from avs import platform_bridge as avs_platform
 from avs import toolbox as avs_toolbox
@@ -6060,9 +6060,104 @@ def synthesize_tool_followup(static_sys_prompt: str, recent_turns: list, first_r
 # =====================================================================
 # 9. TELEGRAM BOT BACKGROUND BRIDGE
 # =====================================================================
-def generate_sync_reply_for_telegram(user_text: str, session_id: str = "telegram_session") -> str:
-    if not STATE["llm"] or STATE["loading_model"]:
-        return "⏳ Local GGUF model is still loading or not selected in AetherVault Studio."
+TELEGRAM_QUEUE_STATE = {
+    "active": False,
+    "queued": 0,
+    "last_step": "Idle",
+    "last_user": "",
+    "last_error": "",
+    "processed_count": 0,
+}
+_TG_OFFSET_FILE = BASE_DIR / ".temp_cache" / "tg_offset.json"
+_TG_WEBHOOK_CLEARED_TOKENS = set()
+
+def _load_tg_offset() -> int:
+    try:
+        if _TG_OFFSET_FILE.exists():
+            data = json.loads(_TG_OFFSET_FILE.read_text(encoding="utf-8"))
+            return int(data.get("last_update_id") or 0)
+    except Exception:
+        pass
+    return int(STATE.get("telegram_last_update_id") or 0)
+
+def _save_tg_offset(uid: int):
+    try:
+        _TG_OFFSET_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _TG_OFFSET_FILE.write_text(json.dumps({"last_update_id": int(uid), "updated_at": time.strftime("%H:%M:%S")}), encoding="utf-8")
+    except Exception:
+        pass
+
+def _tg_api_post(token: str, method: str, payload: dict, timeout: int = 15) -> dict:
+    try:
+        r = requests.post(f"https://api.telegram.org/bot{token}/{method}", json=payload, timeout=timeout)
+        if r.status_code == 200:
+            return r.json()
+        return {"ok": False, "status": r.status_code, "text": (r.text or "")[:200]}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+def _tg_edit_or_send_status(token: str, chat_id: str, status_msg_id: int, text: str) -> int:
+    clean_t = (text or "Working...")[:3900]
+    if status_msg_id:
+        res = _tg_api_post(token, "editMessageText", {"chat_id": chat_id, "message_id": status_msg_id, "text": clean_t}, timeout=10)
+        if res.get("ok"):
+            return status_msg_id
+    sent = _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": clean_t}, timeout=10)
+    return ((sent.get("result") or {}).get("message_id")) or status_msg_id
+
+def _tg_send_media(token: str, chat_id: str, img_url: str = None, audio_url: str = None):
+    if img_url:
+        img_path = GEN_IMG_DIR / Path(img_url).name
+        if img_path.exists():
+            try:
+                with open(img_path, "rb") as f:
+                    requests.post(f"https://api.telegram.org/bot{token}/sendPhoto", data={"chat_id": chat_id}, files={"photo": f}, timeout=25)
+            except Exception:
+                pass
+    if audio_url:
+        aud_path = GEN_AUDIO_DIR / Path(audio_url).name
+        if aud_path.exists():
+            try:
+                with open(aud_path, "rb") as f:
+                    requests.post(f"https://api.telegram.org/bot{token}/sendAudio", data={"chat_id": chat_id}, files={"audio": f}, timeout=25)
+            except Exception:
+                pass
+
+def generate_sync_reply_for_telegram(user_text: str, session_id: str = "telegram_session", progress_cb=None) -> tuple:
+    """
+    Robust v5.4 Telegram Brain + Live Python Workbench Engine:
+    - Works across Local GGUF, Smart API Waterfall, and Hybrid modes.
+    - Streams live step progress to Telegram ('Working in Workbench...') AND the main Studio UI top bar.
+    - Never crashes the polling thread on malformed outputs or empty replies.
+    Returns (reply_text, image_url, audio_url).
+    """
+    def _notify(step_msg: str):
+        TELEGRAM_QUEUE_STATE["last_step"] = step_msg
+        set_step(f"📱 [Telegram] {step_msg}")
+        if progress_cb:
+            try:
+                progress_cb(step_msg)
+            except Exception:
+                pass
+
+    if STATE["loading_model"]:
+        return "⏳ Local GGUF model is currently loading into RAM/VRAM. Give it a few seconds and send your message again!", None, None
+
+    b_mode = WORKSPACE_CFG.get("brain_mode", "local_only")
+    has_api_slots = bool([s for s in load_api_vault().get("slots", []) if s.get("enabled", True)])
+    can_use_api = (b_mode in ("smart_api", "hybrid")) and has_api_slots and not STATE["offline_mode"]
+    if not STATE["llm"] and not can_use_api:
+        target_m = pick_lightweight_failsafe_model() if (b_mode == "hybrid" or STATE["performance_mode"] == "Laptop 2015 (Fast)") else (WORKSPACE_CFG.get("last_loaded_model") or pick_lightweight_failsafe_model())
+        if target_m:
+            _notify(f"🧠 Auto-loading offline GGUF '{target_m}'...")
+            load_local_model(target_m)
+        if not STATE["llm"]:
+            return "⚠️ No local GGUF model loaded and no Smart API key configured in Studio yet.", None, None
+
+    ai_n = WORKSPACE_CFG.get("ai_name", "Aether")
+    usr_n = WORKSPACE_CFG.get("user_name", "Creator")
+    STATE["stop_requested"] = False
+    STATE["last_user_msg"] = user_text
 
     with get_db() as conn:
         c = conn.cursor()
@@ -6072,40 +6167,133 @@ def generate_sync_reply_for_telegram(user_text: str, session_id: str = "telegram
         c.execute("SELECT role, content FROM chat_messages WHERE session_id = ? ORDER BY id DESC LIMIT 6", (session_id,))
         recent_turns = [{"role": r["role"], "content": r["content"]} for r in reversed(c.fetchall())]
 
-    gear, _ = classify_task_gear(user_text)
-    ai_n = WORKSPACE_CFG.get("ai_name", "Aether")
-    usr_n = WORKSPACE_CFG.get("user_name", "Creator")
+    harvest_passive_user_notes(user_text)
+    sync_pseudo_memory_and_index()
+    gear, _ = classify_task_gear(user_text, "", recent_turns)
+    img_out = None
+    aud_out = None
+    reply = ""
 
-    if gear == "reflex":
-        mem_context = format_memories_for_prompt(limit=3)
-        digest = PRIORITY_CACHE["reflex_core_digest"] or build_reflex_persona_digest(WORKSPACE_CFG["persona_prompt"], ai_n, usr_n)
-        static_sys = f"=== ACTIVE STATE ===\n{mem_context}\n\n{digest}"
-        messages = build_safe_messages(static_sys, "", recent_turns, max_turns=3)
-        cfg = get_governor_settings("reflex", sum(len(m["content"]) for m in messages))
-    else:
-        mem_context = format_memories_for_prompt(limit=10)
-        core_rules = PRIORITY_CACHE["core_rules_text"] or WORKSPACE_CFG["persona_prompt"].replace("{ai_name}", ai_n).replace("{user_name}", usr_n)
-        retrieved_lore, _ = retrieve_relevant_lore(user_text, top_k=2)
-        static_sys = f"=== PRIORITY 1: MEMORY VAULT ===\n{mem_context}\n\n=== PRIORITY 2: CORE IDENTITY ===\n{core_rules}"
-        messages = build_safe_messages(static_sys, retrieved_lore, recent_turns, max_turns=6)
-        cfg = get_governor_settings("deep", sum(len(m["content"]) for m in messages))
+    STATE["generating"] = True
+    try:
+        if gear == "reflex":
+            _notify("⚡ Gear 1 Reflex: thinking...")
+            mem_short = format_memories_for_prompt(limit=3)
+            digest = PRIORITY_CACHE["reflex_core_digest"] or build_reflex_persona_digest(WORKSPACE_CFG["persona_prompt"], ai_n, usr_n)
+            static_sys = f"{digest}\n\n=== SESSION STATE ===\n{mem_short}"
+            messages = build_safe_messages(static_sys, "", recent_turns, max_turns=3)
+            cfg = get_governor_settings("reflex", sum(len(m["content"]) for m in messages))
+            reply = dispatch_brain_sync(
+                messages=messages, max_tokens=cfg["max_tokens"],
+                temperature=0.75, top_p=0.92, min_p=0.12, repeat_penalty=1.15,
+                stop=["<START>", f"\n{usr_n}:", "\nUser:", "[INST]", "[/INST]"]
+            )
+            if any(tag in reply for tag in ("[[DEEP]]", "[DEEP]", "<tool_call>", "```workbench", "vault.")):
+                gear = "operator"
+            else:
+                reply = re.sub(r"<think>[\s\S]*?</think>", "", reply, flags=re.IGNORECASE).strip()
+                fast_search_m = re.search(r"\[\[SEARCH:([^\]]+)\]\]", reply)
+                if fast_search_m and not STATE["offline_mode"]:
+                    fs_q = clean_web_search_query(fast_search_m.group(1).strip())
+                    _notify(f"🌐 Searching web for '{fs_q[:36]}'...")
+                    fs_out = search_web(fs_q)[:1400]
+                    reply = synthesize_tool_followup(static_sys, recent_turns[-3:], re.sub(r"\[\[SEARCH:[^\]]+\]\]", "", reply).strip() or "Checking online.", f"[Live Web Search Results]:\n{fs_out}", cfg, usr_n, ai_n)
+                elif is_auto_web_search_enabled() and detect_model_uncertainty(reply) and is_query_searchable_for_rescue(user_text):
+                    rq = clean_web_search_query(user_text)
+                    _notify(f"🌐 Auto-searching web for '{rq[:36]}'...")
+                    r_out = search_web(rq)[:1400]
+                    reply = synthesize_tool_followup(static_sys, recent_turns[-3:], reply, f"[Auto-Web Results]:\n{r_out}", cfg, usr_n, ai_n)
 
-    with LLM_LOCK:
-        res = STATE["llm"].create_chat_completion(
-            messages=messages, max_tokens=cfg["max_tokens"],
-            temperature=0.78, top_p=0.95, min_p=0.12, repeat_penalty=1.15
-        )
-    reply = (res["choices"][0]["message"].get("content") or "").strip()
-    reply = re.sub(r"<think>[\s\S]*?</think>", "", reply).strip()
+        if gear != "reflex":
+            is_op = (gear == "operator")
+            _notify("🛠️ Preparing Assistant & Live Python Workbench..." if is_op else "🧠 Gear 2 Deep Context + Workbench...")
+            mem_context = format_memories_for_prompt(limit=4 if is_op else 12)
+            if is_op:
+                static_sys = build_assistant_workbench_system_prompt(ai_n, usr_n, mem_context)
+                dyn_ctx = ""
+            else:
+                core_rules = PRIORITY_CACHE["core_rules_text"] or WORKSPACE_CFG["persona_prompt"].replace("{ai_name}", ai_n).replace("{user_name}", usr_n)
+                retrieved_lore, _ = retrieve_relevant_lore(user_text, top_k=2)
+                static_sys = f"=== PRIORITY 1: MEMORY VAULT ===\n{mem_context}\n\n=== PRIORITY 2: CORE IDENTITY ===\n{core_rules}\n\n{build_pc_reality_anchor()}"
+                dyn_ctx = retrieved_lore
 
-    with get_db() as conn:
-        conn.execute("INSERT INTO chat_messages (session_id, role, content) VALUES (?, 'assistant', ?)", (session_id, reply))
-        conn.execute("UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (session_id,))
-        conn.commit()
-    export_chats_to_txt_files()
-    return reply
+            is_g, g_act = is_tool_gauntlet_query(user_text)
+            if is_g:
+                _notify("🧪 Running Step-by-Step Tool Gauntlet...")
+                dyn_ctx += "\n" + run_tool_gauntlet_compact(include_active=g_act)
+            else:
+                is_wq, wcity = detect_weather_intent(user_text)
+                if is_wq and not STATE["offline_mode"] and wcity:
+                    _notify(f"🌦️ Fetching live weather for '{wcity}'...")
+                    dyn_ctx += f"\n[REAL LIVE WEATHER DATA]:\n{get_live_weather(wcity)}"
+
+            messages = build_safe_messages(static_sys, dyn_ctx, recent_turns, max_turns=6)
+            cfg = get_governor_settings("deep", sum(len(m["content"]) for m in messages))
+            reply = ""
+            max_rounds = 4 if is_unrestricted_tokens_enabled() else 2
+            for r_idx in range(max_rounds):
+                if STATE["stop_requested"]:
+                    break
+                _notify(f"💭 Generating response (Pass {r_idx+1}/{max_rounds})...")
+                round_raw = dispatch_brain_sync(
+                    messages=messages, max_tokens=cfg["max_tokens"],
+                    temperature=0.75, top_p=0.95, min_p=0.12, repeat_penalty=1.15,
+                    stop=["<START>", f"\n{usr_n}:", "\nUser:", "[INST]", "[/INST]"]
+                )
+                stripped = re.sub(r"<think>[\s\S]*?</think>", "", round_raw, flags=re.IGNORECASE).strip()
+                wb_blocks, wb_cleaned = extract_workbench_blocks(stripped)
+                inline_calls, cleaned_round = extract_inline_tool_calls(wb_cleaned)
+
+                obs_list = []
+                if wb_blocks:
+                    for wb_i, wb_code in enumerate(wb_blocks):
+                        _notify(f"🐍 Working in Python Workbench (Round {r_idx+1}, Step {wb_i+1})...")
+                        wb_res = execute_workbench_code(wb_code)
+                        obs_list.append(wb_res.get("output") or "")
+                        if wb_res.get("image_url"):
+                            img_out = wb_res["image_url"]
+                        if wb_res.get("audio_url"):
+                            aud_out = wb_res["audio_url"]
+                elif inline_calls:
+                    for ic in inline_calls:
+                        _notify(f"🔧 Running tool '{ic['name']}' (Round {r_idx+1})...")
+                        o_txt, t_i, t_a = execute_unified_tool(ic["name"], ic["arguments"], session_id)
+                        obs_list.append(o_txt)
+                        if t_i:
+                            img_out = t_i
+                        if t_a:
+                            aud_out = t_a
+
+                if obs_list and r_idx < (max_rounds - 1):
+                    joined_obs = "\n\n".join(obs_list)[:4500]
+                    messages.append({"role": "assistant", "content": round_raw})
+                    messages.append({"role": "user", "content": f"[WORKBENCH EXECUTION OUTPUT]:\n{joined_obs}\n\nNow reply naturally to {usr_n} as {ai_n} using these exact results."})
+                    continue
+
+                reply = cleaned_round or wb_cleaned or stripped
+                break
+
+        reply = clean_assistant_theatrics(reply, is_assistant_mode=(WORKSPACE_CFG.get("workspace_mode") == "assistant"))
+        if not reply:
+            reply = "✅ Done."
+        update_partner_evolution(user_text, reply)
+        with get_db() as conn:
+            conn.execute("INSERT INTO chat_messages (session_id, role, content) VALUES (?, 'assistant', ?)", (session_id, reply))
+            conn.execute("UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (session_id,))
+            conn.commit()
+        export_chats_to_txt_files()
+        return reply, img_out, aud_out
+    except Exception as tg_err:
+        err_s = f"{type(tg_err).__name__}: {tg_err}"
+        TELEGRAM_QUEUE_STATE["last_error"] = err_s
+        return f"⚠️ Telegram turn encountered an issue: {err_s[:240]}", None, None
+    finally:
+        STATE["generating"] = False
+        TELEGRAM_QUEUE_STATE["last_step"] = "Idle"
+        set_step("Idle")
 
 def telegram_polling_worker():
+    STATE["telegram_last_update_id"] = _load_tg_offset()
     while True:
         try:
             tg_cfg = WORKSPACE_CFG.get("telegram", {})
@@ -6113,48 +6301,106 @@ def telegram_polling_worker():
             enabled = bool(tg_cfg.get("enabled")) and bool(token) and not STATE["offline_mode"]
             if not enabled:
                 STATE["telegram_status"] = "Disabled"
+                TELEGRAM_QUEUE_STATE["active"] = False
+                TELEGRAM_QUEUE_STATE["queued"] = 0
                 time.sleep(3)
                 continue
 
+            # Clear any lingering webhook once per token so getUpdates never 409-conflicts
+            if token not in _TG_WEBHOOK_CLEARED_TOKENS:
+                _tg_api_post(token, "deleteWebhook", {"drop_pending_updates": False}, timeout=8)
+                _TG_WEBHOOK_CLEARED_TOKENS.add(token)
+
             STATE["telegram_status"] = "Connected (Polling)"
+            TELEGRAM_QUEUE_STATE["last_error"] = ""
             url = f"https://api.telegram.org/bot{token}/getUpdates"
-            params = {"offset": STATE["telegram_last_update_id"] + 1, "timeout": 15}
-            r = requests.get(url, params=params, timeout=20)
+            params = {"offset": int(STATE["telegram_last_update_id"]) + 1, "timeout": 15}
+            r = requests.get(url, params=params, timeout=22)
             if r.status_code != 200:
                 STATE["telegram_status"] = f"Error (HTTP {r.status_code})"
+                TELEGRAM_QUEUE_STATE["last_error"] = f"HTTP {r.status_code}"
                 time.sleep(5)
                 continue
 
-            updates = r.json().get("result", [])
+            updates = (r.json() or {}).get("result") or []
+            pending_msgs = []
+            max_uid = int(STATE["telegram_last_update_id"])
             for u in updates:
-                STATE["telegram_last_update_id"] = u["update_id"]
-                msg = u.get("message") or {}
-                chat_id = str(msg.get("chat", {}).get("id", ""))
-                text = (msg.get("text") or "").strip()
-                if not text or not chat_id:
-                    continue
+                uid = int(u.get("update_id") or 0)
+                if uid > max_uid:
+                    max_uid = uid
+                msg = u.get("message") or u.get("edited_message") or {}
+                chat_id = str((msg.get("chat") or {}).get("id") or "")
+                text = (msg.get("text") or msg.get("caption") or "").strip()
+                if text and chat_id:
+                    pending_msgs.append((chat_id, text))
 
+            if max_uid > int(STATE["telegram_last_update_id"]):
+                STATE["telegram_last_update_id"] = max_uid
+                _save_tg_offset(max_uid)
+
+            TELEGRAM_QUEUE_STATE["queued"] = len(pending_msgs)
+            for idx_m, (chat_id, text) in enumerate(pending_msgs):
+                TELEGRAM_QUEUE_STATE["queued"] = max(0, len(pending_msgs) - idx_m - 1)
                 allowed_id = (tg_cfg.get("allowed_chat_id") or "").strip()
                 if allowed_id and chat_id != allowed_id:
-                    requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={
+                    _tg_api_post(token, "sendMessage", {
                         "chat_id": chat_id,
                         "text": f"🔒 Unauthorized Chat ID ({chat_id}). Add this ID in AetherVault Studio settings to allow access."
                     }, timeout=10)
                     continue
 
-                if text == "/start":
+                low_t = text.lower()
+                if low_t in ("/start", "/help"):
                     ai_n = WORKSPACE_CFG.get("ai_name", "Aether")
-                    requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={
+                    _tg_api_post(token, "sendMessage", {
                         "chat_id": chat_id,
-                        "text": f"⚡ {ai_n} connected via AetherVault Studio! Your Telegram Chat ID is: {chat_id}"
+                        "text": (
+                            f"⚡ {ai_n} connected via AetherVault Studio v{APP_VERSION}!\n"
+                            f"Your Telegram Chat ID: {chat_id}\n"
+                            f"Commands: /status, /specs, /queue, /stop, /update, /py <code>, or chat naturally with full Python Workbench access!"
+                        )
                     }, timeout=10)
                     continue
 
-                reply = generate_sync_reply_for_telegram(text)
-                requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={
-                    "chat_id": chat_id, "text": reply[:4000]
-                }, timeout=15)
+                if low_t == "/stop":
+                    STATE["stop_requested"] = True
+                    _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": "⏹️ Stop signal sent to active generation."}, timeout=10)
+                    continue
+
+                if low_t in ("/status", "/specs", "/queue", "/update") or low_t.startswith(("/py ", "/toggle ", "/inject ", "/log")):
+                    term_res = api_terminal_exec({"command": "/telegram" if low_t == "/queue" else text})
+                    _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": (term_res.get("output") or "Done")[:4000]}, timeout=15)
+                    continue
+
+                TELEGRAM_QUEUE_STATE["active"] = True
+                TELEGRAM_QUEUE_STATE["last_user"] = text[:80]
+                _tg_api_post(token, "sendChatAction", {"chat_id": chat_id, "action": "typing"}, timeout=6)
+                q_note = f" (Queued behind: {TELEGRAM_QUEUE_STATE['queued']})" if TELEGRAM_QUEUE_STATE["queued"] > 0 else ""
+                status_mid = _tg_edit_or_send_status(token, chat_id, 0, f"⏳ Working on it...{q_note}")
+                last_edit_ts = [time.time()]
+
+                def _on_tg_progress(step_s: str):
+                    now_t = time.time()
+                    if (now_t - last_edit_ts[0]) >= 1.8:
+                        last_edit_ts[0] = now_t
+                        _tg_api_post(token, "sendChatAction", {"chat_id": chat_id, "action": "typing"}, timeout=5)
+                        _tg_edit_or_send_status(token, chat_id, status_mid, f"⚙️ {step_s}")
+
+                try:
+                    reply, img_url, aud_url = generate_sync_reply_for_telegram(text, session_id=f"telegram_{chat_id}", progress_cb=_on_tg_progress)
+                    if status_mid:
+                        _tg_api_post(token, "deleteMessage", {"chat_id": chat_id, "message_id": status_mid}, timeout=6)
+                    for chunk_start in range(0, len(reply), 3950):
+                        _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": reply[chunk_start:chunk_start + 3950]}, timeout=15)
+                    _tg_send_media(token, chat_id, img_url=img_url, audio_url=aud_url)
+                    TELEGRAM_QUEUE_STATE["processed_count"] = int(TELEGRAM_QUEUE_STATE.get("processed_count") or 0) + 1
+                finally:
+                    TELEGRAM_QUEUE_STATE["active"] = False
+                    TELEGRAM_QUEUE_STATE["queued"] = 0
         except Exception as e:
+            TELEGRAM_QUEUE_STATE["active"] = False
+            TELEGRAM_QUEUE_STATE["last_error"] = f"{type(e).__name__}: {e}"
             STATE["telegram_status"] = f"Standby ({type(e).__name__})"
             time.sleep(5)
 
@@ -6380,6 +6626,7 @@ def get_status():
         "api_vault": get_masked_api_vault(),
         "api_templates": API_PROVIDER_TEMPLATES,
         "telegram_status": STATE["telegram_status"],
+        "telegram_queue": TELEGRAM_QUEUE_STATE,
         "ram": get_system_ram_info(),
         "download": STATE["download"],
         "pdf_details": file_info,
@@ -6423,7 +6670,7 @@ MCP_TOOL_DEFINITIONS = [
 def _run_mcp_tool(tool_name: str, arguments: dict) -> dict:
     args = arguments if isinstance(arguments, dict) else {}
     if tool_name == "aethervault_status":
-        return {"content": [{"type": "text", "text": json.dumps({"version": APP_VERSION, "ai_name": WORKSPACE_CFG.get("ai_name", "Aether"), "brain_mode": WORKSPACE_CFG.get("brain_mode", "local_only"), "workspace_mode": WORKSPACE_CFG.get("workspace_mode", "assistant")}, indent=2)}], "isError": False}
+        return {"content": [{"type": "text", "text": json.dumps({"version": APP_VERSION, "app_version": APP_VERSION, "ai_name": WORKSPACE_CFG.get("ai_name", "Aether"), "brain_mode": WORKSPACE_CFG.get("brain_mode", "local_only"), "workspace_mode": WORKSPACE_CFG.get("workspace_mode", "assistant")}, indent=2)}], "isError": False}
     if tool_name == "aethervault_vault_search":
         q = str(args.get("query") or "").strip()
         mems = [m for m in list_memories() if q.lower() in f"{m.get('category','')} {m.get('fact','')}".lower()] if q else list_memories()[:10]
@@ -6473,6 +6720,156 @@ def api_workbench_subprocess(payload: dict):
 def api_hardware_specs():
     """SpecPulse-inspired deep hardware inventory (64-bit Registry VRAM + WMI/psutil live telemetry)."""
     return avs_hw.get_full_hardware_report()
+
+
+@app.post("/api/terminal/exec")
+def api_terminal_exec(payload: dict):
+    """Web Terminal / Manager Console endpoint for desktop & mobile browsers."""
+    raw = str(payload.get("command") or "").strip()
+    if not raw:
+        return {"ok": True, "output": ""}
+    parts = raw.split(None, 1)
+    cmd = parts[0].lower()
+    arg = parts[1].strip() if len(parts) > 1 else ""
+
+    if cmd in ("/help", "help", "?"):
+        return {"ok": True, "output": (
+            "=== AETHERVAULT v" + APP_VERSION + " WEB TERMINAL COMMANDS ===\n"
+            "  /help                     Show this command list\n"
+            "  /status                   Live model, GPU, RAM, mode & trust status\n"
+            "  /specs                    Deep SpecPulse hardware inventory (64-bit VRAM, CPU, GPU)\n"
+            "  /stop                     Halt active generation loop immediately\n"
+            "  /inject <cat> | <fact>    Save fact into Priority #1 Memory Vault\n"
+            "  /toggle <key> <val>       Flip Studio toggle (e.g. /toggle workbench_trust full_pc)\n"
+            "  /py <code>                Run Python in killable subprocess Workbench\n"
+            "  /pip <pkg>                Install custom PyPI package into .venv\n"
+            "  /log [keyword] [lines]    Tail error_audit.log locally\n"
+            "  /update                   Pull latest v" + APP_VERSION + "+ files from GitHub (SHA-256 verified)\n"
+            "  /tunnel                   Check remote tunnel status & mobile access guide\n"
+            "  /sh <shell_cmd>           Run host shell command (requires Full PC trust)"
+        )}
+    if cmd == "/telegram":
+        return {"ok": True, "output": f"[TELEGRAM BRIDGE] Status: {STATE.get('telegram_status')} | Active: {TELEGRAM_QUEUE_STATE.get('active')} | Queued: {TELEGRAM_QUEUE_STATE.get('queued')} | Step: {TELEGRAM_QUEUE_STATE.get('last_step')}"}
+    if cmd == "/status":
+        ram = get_system_ram_info()
+        return {"ok": True, "output": (
+            f"[STATUS v{APP_VERSION}] Model: {STATE.get('current_model')} | GPU: {STATE.get('gpu_offload')} | "
+            f"Mode: {WORKSPACE_CFG.get('workspace_mode')} | Trust: {WORKSPACE_CFG.get('workbench_trust')} | "
+            f"Brain: {WORKSPACE_CFG.get('brain_mode')} | RAM: {ram.get('free_gb')}/{ram.get('total_gb')} GB free | "
+            f"LAN: http://{get_local_lan_ip()}:{SERVER_PORT}"
+        )}
+    if cmd == "/specs":
+        rep = avs_hw.get_full_hardware_report()
+        sp = rep.get("specs") or {}
+        lv = rep.get("live") or {}
+        gpus = ", ".join(f"{g.get('name')} ({g.get('vram_gb')} GB)" for g in (sp.get("gpus") or []))
+        return {"ok": True, "output": (
+            f"[SPECS] Host: {sp.get('hostname')} | CPU: {(sp.get('cpu') or {}).get('name')} ({lv.get('cpu_percent')}%)\n"
+            f"        GPU: {gpus} (Load: {lv.get('gpu_util_percent')}% | VRAM Used: {lv.get('gpu_vram_used_mb')} MB)\n"
+            f"        RAM: {lv.get('ram_used_gb')}/{(sp.get('ram') or {}).get('total_gb')} GB ({lv.get('ram_percent')}%)"
+        )}
+    if cmd == "/stop":
+        STATE["stop_requested"] = True
+        return {"ok": True, "output": "[STOP] Generation stop signal sent."}
+    if cmd == "/inject":
+        cat, fact = [x.strip() for x in arg.split("|", 1)] if "|" in arg else ("active_state", arg)
+        if not fact:
+            return {"ok": False, "output": "[USAGE] /inject <category> | <fact>"}
+        return {"ok": True, "output": f"[INJECT] {save_to_memory(cat, fact)}"}
+    if cmd == "/toggle":
+        t_parts = arg.split(None, 1)
+        if len(t_parts) < 2:
+            return {"ok": False, "output": "[USAGE] /toggle <setting> <value>"}
+        return {"ok": True, "output": f"[TOGGLE] {apply_studio_toggle(t_parts[0], t_parts[1])}"}
+    if cmd == "/py":
+        if not arg:
+            return {"ok": False, "output": "[USAGE] /py print(2 + 2)"}
+        res = avs_workbench.run_workbench_subprocess(
+            code_str=arg, temp_dir=TEMP_SESSION_DIR, port=SERVER_PORT,
+            token=WORKBENCH_TOKEN, timeout_sec=15.0,
+            trust_level=WORKSPACE_CFG.get("workbench_trust", "safe_auto"),
+        )
+        return {"ok": bool(res.get("ok")), "output": f"[PY ok={res.get('ok')} | {res.get('elapsed_sec')}s]\n{res.get('output')}"}
+    if cmd == "/pip":
+        if not arg:
+            return {"ok": False, "output": "[USAGE] /pip <package_name>"}
+        res = api_manage_package({"pkg": arg, "action": "install"})
+        return {"ok": bool(res.get("ok")), "output": res.get("output") or res.get("error") or "Done"}
+    if cmd == "/log":
+        toks = arg.split()
+        n_lines = int(toks[-1]) if (toks and toks[-1].isdigit()) else 25
+        kw = " ".join(toks[:-1] if (toks and toks[-1].isdigit()) else toks).strip()
+        return {"ok": True, "output": workbench_debug_log(kw, n_lines)}
+    if cmd == "/update":
+        return api_ota_update()
+    if cmd == "/tunnel":
+        return {"ok": True, "output": (
+            f"[REMOTE ACCESS]\n"
+            f"1. Home Wi-Fi LAN: http://{get_local_lan_ip()}:{SERVER_PORT}\n"
+            f"2. Telegram Bot Bridge: Configure Bot Token in Studio -> Integrations to chat from anywhere with zero port-forwarding!\n"
+            f"3. Anywhere HTTPS Tunnel: Run 'cloudflared tunnel --url http://127.0.0.1:{SERVER_PORT}' or Tailscale on your PC to get a private HTTPS link for your phone."
+        )}
+    if cmd == "/sh":
+        if not arg:
+            return {"ok": False, "output": "[USAGE] /sh <command>"}
+        return {"ok": True, "output": run_silent_shell_command(arg)}
+    return {"ok": False, "output": f"Unknown command '{cmd}'. Type /help for available commands."}
+
+@app.post("/api/ota/update")
+def api_ota_update():
+    """Pulls latest core files from EnZeeeRu/AetherVault-Studio (SHA-256 verified) directly from the UI or phone."""
+    slug = "EnZeeeRu/AetherVault-Studio"
+    base_raw = f"https://raw.githubusercontent.com/{slug}/main"
+    try:
+        r = requests.get(f"{base_raw}/manifest.json", headers={"User-Agent": f"AetherVaultStudio/{APP_VERSION}"}, timeout=15)
+        r.raise_for_status()
+        manifest = r.json()
+    except Exception as e:
+        return {"ok": False, "output": f"[OTA ERROR] Could not fetch manifest.json: {e}"}
+
+    files = manifest.get("files") or {}
+    updated = []
+    stock_dir = BASE_DIR / "stock_vault"
+    stock_dir.mkdir(parents=True, exist_ok=True)
+    for rel_path, expected_sha in files.items():
+        if ".." in rel_path or rel_path.startswith("/"):
+            continue
+        dest = (BASE_DIR / rel_path).resolve()
+        if BASE_DIR.resolve() not in dest.parents and dest != BASE_DIR.resolve():
+            continue
+        if dest.exists() and expected_sha and hashlib.sha256(dest.read_bytes()).hexdigest() == expected_sha:
+            continue
+        try:
+            fr = requests.get(f"{base_raw}/{rel_path}", headers={"User-Agent": f"AetherVaultStudio/{APP_VERSION}"}, timeout=25)
+            fr.raise_for_status()
+            raw_b = fr.read()
+            if expected_sha and hashlib.sha256(raw_b).hexdigest() != expected_sha:
+                continue
+            if dest.exists() and dest.parent == BASE_DIR.resolve() and dest.name in ("assistant_server.py", "ui_studio.html"):
+                shutil.copy2(dest, stock_dir / f"{dest.name}.good")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(raw_b)
+            updated.append(rel_path)
+        except Exception:
+            pass
+    ver_new = manifest.get("version", "?")
+    if updated:
+        msg = f"[OTA OK] Updated {len(updated)} file(s) to v{ver_new}: {', '.join(updated)}. Reload page (or restart server if .py changed)!"
+    else:
+        msg = f"[OTA OK] Already up to date with {slug} (v{ver_new})."
+    return {"ok": True, "version": ver_new, "updated": updated, "output": msg}
+
+@app.post("/api/system/restart")
+def api_system_restart():
+    """Cleanly spawns a fresh instance of assistant_server.py on the same port and exits."""
+    def _delayed_restart():
+        time.sleep(0.8)
+        env = os.environ.copy()
+        env["AVS_PORT"] = str(SERVER_PORT)
+        subprocess.Popen([sys.executable, "-u", str(BASE_DIR / "assistant_server.py")], cwd=str(BASE_DIR), env=env)
+        os._exit(0)
+    threading.Thread(target=_delayed_restart, daemon=True).start()
+    return {"ok": True, "message": "Restarting AetherVault Studio backend... Page will reconnect in ~3 seconds."}
 
 @app.get("/specpulse", response_class=HTMLResponse)
 def serve_specpulse_dashboard():
@@ -6574,7 +6971,7 @@ async def mcp_jsonrpc(request: Request):
 def get_about_info():
     return {
         "project_name": "AetherVault Studio",
-        "version": f"{APP_VERSION}.0 (Unified Cross-Platform Manager, MCP Server & Gemma 4 Edition)",
+        "version": f"v{APP_VERSION} Evergreen (Mobile Studio, SpecPulse & OTA Edition)",
         "credits": "Made with ❤️ in Argentina by Enzeru, with the collaboration of Google Gemini.",
         "legal_addendum": (
             "All rights reserved to their respective owners. Every Python package (pip module) installed by the user, "

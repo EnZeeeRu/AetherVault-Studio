@@ -20,8 +20,7 @@ import webbrowser
 import urllib.request
 from pathlib import Path
 
-APP_VERSION = "5.0"
-OFFICIAL_GITHUB_REPO = "EnZeeeRu/AetherVault-Studio"
+APP_VERSION = "5.4"
 SERVER_PORT = int(os.environ.get("AVS_PORT", "8000"))
 ROOT_DIR = Path(__file__).parent.resolve()
 VENV_DIR = ROOT_DIR / ".venv"
@@ -406,14 +405,41 @@ def download_model_file(repo: str, fname: str, log_fn=print, progress_fn=None):
 
 
 
-def sync_from_github_ota(log_fn=print) -> bool:
+def get_configured_github_repo() -> str:
+    cfg_p = ROOT_DIR / "workspace_config.json"
+    if cfg_p.exists():
+        try:
+            data = json.loads(cfg_p.read_text(encoding="utf-8"))
+            return str(data.get("github_repo") or "").strip().strip("/")
+        except Exception:
+            pass
+    return os.environ.get("AVS_GITHUB_REPO", "").strip().strip("/")
+
+
+def set_configured_github_repo(repo_slug: str, log_fn=print):
+    slug = (repo_slug or "").strip().strip("/")
+    cfg_p = ROOT_DIR / "workspace_config.json"
+    data = {}
+    if cfg_p.exists():
+        try:
+            data = json.loads(cfg_p.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    data["github_repo"] = slug
+    cfg_p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    log_fn(f"[GITHUB] Linked repository -> '{slug or '(none)'}'")
+
+
+def sync_from_github_ota(repo_slug: str = "", log_fn=print) -> bool:
     """
-    v5.0 Evergreen Locked OTA Updater & 3-File Auto-Hydrator:
-    Strictly pinned to OFFICIAL_GITHUB_REPO (EnZeeeRu/AetherVault-Studio).
-    Fetches manifest.json, verifies SHA-256 checksums, snapshots core files to stock_vault first,
-    and updates core files WITHOUT touching user data!
+    v5.0 Evergreen OTA Updater & 3-File Auto-Hydrator:
+    Fetches manifest.json from GitHub raw URL, verifies SHA-256 checksums,
+    snapshots core files to stock_vault first, and updates core files WITHOUT touching user data!
     """
-    slug = OFFICIAL_GITHUB_REPO
+    slug = (repo_slug or get_configured_github_repo()).strip().strip("/")
+    if not slug or "/" not in slug:
+        log_fn("[OTA] No GitHub repo configured. Run: /repo <username>/AetherVault-Studio")
+        return False
     base_raw = f"https://raw.githubusercontent.com/{slug}/main"
     manifest_url = f"{base_raw}/manifest.json"
     log_fn(f"[OTA] Checking {manifest_url} ...")
@@ -570,9 +596,6 @@ def launch_desktop_gui(snap_info: str) -> bool:
         def _task():
             vpy = ensure_environment(log_fn=ui_log, force_install=False)
             srv = ROOT_DIR / "assistant_server.py"
-            if not srv.exists():
-                ui_log(f"[BOOTSTRAP] Core files missing — auto-hydrating from {OFFICIAL_GITHUB_REPO}...")
-                sync_from_github_ota(log_fn=ui_log)
             if not check_python_syntax(srv, log_fn=ui_log):
                 return
             active_port = find_available_port(SERVER_PORT)
@@ -718,6 +741,7 @@ def launch_desktop_gui(snap_info: str) -> bool:
                 "  /clear                       Clear console output\n"
                 "  /specs                       Deep SpecPulse hardware specs (64-bit VRAM, CPU, RAM)\n"
                 "  /pip <pkg>                   Install any custom PyPI package into .venv\n"
+                "  /repo <user/repo>            Link GitHub repo for 1-click OTA updates\n"
                 "  /update                      Pull latest core files from GitHub (preserves user data)\n"
                 "  /restart                     Stop & relaunch assistant_server.py"
             )
@@ -754,8 +778,10 @@ def launch_desktop_gui(snap_info: str) -> bool:
                 ui_log("[USAGE] /pip <package_name>")
                 return
             run_bg(f"pip install {arg}", lambda: run_streamed_cmd([str(ensure_venv(log_fn=ui_log)), "-m", "pip", "install", arg], log_fn=ui_log))
+        elif cmd == "/repo":
+            set_configured_github_repo(arg, log_fn=ui_log)
         elif cmd == "/update":
-            run_bg("GitHub OTA Update", lambda: sync_from_github_ota(log_fn=ui_log))
+            run_bg("GitHub OTA Update", lambda: sync_from_github_ota(arg, log_fn=ui_log))
         elif cmd == "/restart":
             on_stop_server()
             root.after(800, on_launch_server)
