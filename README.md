@@ -9,6 +9,7 @@
       <img src="https://img.shields.io/badge/Release-v5.1%20Evergreen-7c3aed?style=for-the-badge&logo=github" alt="Release v5.1" />
     </a>
     <img src="https://img.shields.io/badge/Python-3.10%2B-38bdf8?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.10+" />
+    <img src="https://img.shields.io/badge/OS-Windows%20%7C%20macOS%20%7C%20Linux-64748b?style=for-the-badge" alt="Windows | macOS | Linux" />
     <img src="https://img.shields.io/badge/Code%20License-MIT-10b981?style=for-the-badge" alt="MIT License" />
     <img src="https://img.shields.io/badge/Assets%20%26%20Docs-CC%20BY--NC%204.0-f59e0b?style=for-the-badge" alt="CC BY-NC 4.0" />
   </p>
@@ -68,11 +69,18 @@ Built directly into AetherVault Studio as a **zero-overhead on-demand overlay** 
 ---
 
 <a id="quick-start"></a>
-## 🚀 Quick Start
+## 🚀 Quick Start (Windows, macOS &amp; Linux / Unix)
 
 1. Download **`AetherVault_Studio_v5.0_3_Evergreen.zip`** from the [Evergreen Release Page](https://github.com/EnZeeeRu/AetherVault-Studio/releases/tag/Evergreen).
 2. Extract the 3 files (`Launch.bat`, `Launch.sh`, `manager.py`) into any empty folder.
-3. Double-click **`Launch.bat`** (Windows) or run **`./Launch.sh`** (macOS / Linux).
+3. Launch using the command for your operating system:
+
+| Platform | How to Start | Notes |
+| :--- | :--- | :--- |
+| **🪟 Windows** | Double-click **`Launch.bat`** | Auto-detects Python 3.10+ (or offers `winget` install) and opens the Desktop Control Center. |
+| **🍎 macOS** | Open Terminal in the folder and run:<br>`chmod +x Launch.sh && ./Launch.sh` | Auto-detects Python 3.10+ (or offers `brew install python@3.11`) and launches `manager.py`. |
+| **🐧 Linux / Unix** | Open Terminal in the folder and run:<br>`chmod +x Launch.sh && ./Launch.sh` | Supports `apt`, `dnf`, `pacman`, and `zypper`. On headless servers or SSH, run `./Launch.sh --cli` for the terminal menu. |
+
 4. Click **1. Launch AetherVault Server**—`manager.py` automatically downloads the verified core files, builds an isolated `.venv`, and opens the Studio UI in your browser.
 5. Need the full guide? Grab the [AetherVault Studio Manual (PDF)](https://github.com/EnZeeeRu/AetherVault-Studio/raw/main/AetherVault_Studio_Manual.pdf) or click **📖 Manual** inside the app.
 
