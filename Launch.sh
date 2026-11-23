@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# AetherVault Studio — Permanent Cross-Platform Bootstrapper (macOS / Linux)
 set -u
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
@@ -22,7 +23,7 @@ find_python() {
 PY_CMD=""
 if ! find_python; then
     echo "======================================================================="
-    echo " [AETHERVAULT STUDIO] Python 3.10+ was not found on this system."
+    echo " [AETHERVAULT STUDIO BOOTSTRAPPER] Python 3.10+ was not found."
     echo "======================================================================="
     INSTALL_CMD=""
     if command -v brew >/dev/null 2>&1; then

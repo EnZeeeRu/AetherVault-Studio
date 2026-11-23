@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <link rel="icon" type="image/svg+xml" href="/logo.svg">
-<title>AetherVault Studio v5.4 — Portable Local AI & OSWorld Workspace</title>
+<title>AetherVault Studio v6.8 Bluesky — Portable Local AI & OSWorld Workspace</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin="" defer></script>
 <style>
@@ -1069,7 +1069,7 @@
       <div style="overflow:hidden;">
         <div id="sidebar-ai-name" style="font-weight:700; font-size:1.0rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">Aether</div>
         <div style="font-size:0.71rem; color:var(--accent-soft); display:flex; align-items:center; gap:4px;">
-          <img src="/logo.svg" style="width:14px; height:14px; border-radius:3px;" alt=""> AVS v5.4
+          <img src="/logo.svg" style="width:14px; height:14px; border-radius:3px;" alt=""> AVS v6.8
         </div>
       </div>
     </div>
@@ -1368,7 +1368,7 @@
 <div class="modal-backdrop" id="studio-modal">
   <div class="modal-window">
     <div class="modal-top">
-      <strong style="font-size:0.95rem; display:flex; align-items:center; gap:8px;"><img src="/logo.svg" style="width:24px; height:24px;" alt="AVS"> AetherVault Studio v5.4 — Configuration, Cropper & Diagnostics</strong>
+      <strong style="font-size:0.95rem; display:flex; align-items:center; gap:8px;"><img src="/logo.svg" style="width:24px; height:24px;" alt="AVS"> AetherVault Studio v6.8 Bluesky — Configuration, Cropper & Diagnostics</strong>
       <div style="display:flex; align-items:center; gap:8px;"><span class="gear-pill" id="modal-hb-pill" style="font-size:0.7rem;" title="Live Server & Download Status"><span class="hb-dot" id="modal-hb-dot"></span><span id="modal-hb-text">💓 Alive</span></span><button class="secondary small-btn" onclick="closeStudioModal()">✖ Close</button></div>
     </div>
 
@@ -1769,6 +1769,36 @@
           </div>
         </div>
 
+        <div class="card" style="margin-bottom:12px; border-color:#0284c7;">
+          <div class="card-header">
+            <h3>🦋 Bluesky AT Protocol Bridge</h3>
+            <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+              <label style="font-size:0.78rem; cursor:pointer;"><input type="checkbox" id="cfg-bsky-enabled"> Enable Bridge</label>
+              <label style="font-size:0.78rem; cursor:pointer;"><input type="checkbox" id="cfg-bsky-mentions"> Auto-Reply Mentions</label>
+              <button class="secondary small-btn" onclick="sendBlueskyTestPost()">🚀 Test Post</button>
+            </div>
+          </div>
+          <div class="form-grid" style="margin-top:6px;">
+            <div class="form-group">
+              <label>Bluesky Handle (e.g. yourname.bsky.social)</label>
+              <input id="cfg-bsky-handle" placeholder="handle.bsky.social">
+            </div>
+            <div class="form-group">
+              <label>Bluesky App Password (NOT your main password)</label>
+              <input type="password" id="cfg-bsky-pass" placeholder="xxxx-xxxx-xxxx-xxxx">
+            </div>
+            <div class="form-group">
+              <label>PDS Server URL</label>
+              <input id="cfg-bsky-pds" placeholder="https://bsky.social">
+            </div>
+            <div class="form-group">
+              <label>Allowed Mention DIDs / Handles (Optional Security Lock)</label>
+              <input id="cfg-bsky-allowed" placeholder="Comma-separated handles or did:plc:...">
+            </div>
+          </div>
+          <div id="bsky-status-box" style="display:none; font-size:0.74rem; padding:7px 9px; border-radius:6px; background:var(--bg); border:1px solid var(--border); margin-top:6px;"></div>
+        </div>
+
         <div class="card" style="margin-bottom:12px;">
           <div class="card-header">
             <h3>🎵 Spotify Web API & Desktop Bridge</h3>
@@ -1810,7 +1840,7 @@
         <div class="card" style="margin-bottom:12px; border-color:#10b981;">
           <div class="card-header">
             <h3>🔄 GitHub OTA Updater &amp; Remote Reload (EnZeeeRu/AetherVault-Studio)</h3>
-            <span class="gear-pill" id="ota-version-pill" style="border-color:#10b981; color:#a7f3d0;">v5.4 Evergreen</span>
+            <span class="gear-pill" id="ota-version-pill" style="border-color:#10b981; color:#a7f3d0;">v6.8 Bluesky</span>
           </div>
           <p style="font-size:0.75rem; color:#9ca3af; margin:4px 0 8px 0;">
             Push an update to GitHub from anywhere, then tap <b>Pull GitHub Update</b> on your phone or PC to SHA-256 verify &amp; sync core files without touching your memories, models, or chats.
@@ -1835,7 +1865,7 @@
               <button class="secondary small-btn" onclick="document.getElementById('web-term-out').innerText=''">Clear</button>
             </div>
           </div>
-          <pre id="web-term-out" class="debug-pre" style="height:220px; max-height:240px; background:#05070b; color:#38bdf8; font-size:0.75rem; line-height:1.45;">AetherVault Studio v5.4 Web Terminal Ready. Type /help for commands.</pre>
+          <pre id="web-term-out" class="debug-pre" style="height:220px; max-height:240px; background:#05070b; color:#38bdf8; font-size:0.75rem; line-height:1.45;">AetherVault Studio v6.8 Bluesky Web Terminal Ready. Type /help for commands.</pre>
           <div style="display:flex; gap:6px; margin-top:8px;">
             <input id="web-term-input" placeholder="Enter command (e.g. /help, /status, /specs, /py print(2+2), /update)..." style="flex:1; font-family:Consolas,monospace; font-size:0.8rem;" onkeydown="if(event.key==='Enter') runWebTerminalCmd()">
             <button class="small-btn" onclick="runWebTerminalCmd()">Run</button>
@@ -1874,18 +1904,18 @@
           <div class="card-header">
             <h3>🩹 1. Commanded Self-Fix & Core Integrity Verifier (Anti-Ouroboros Gatekeeper)</h3>
             <div style="display:flex; gap:5px;">
-              <button class="small-btn" onclick="verifyAllCoreFiles()">🔍 Verify All 4 Core Files</button>
+              <button class="small-btn" onclick="verifyAllCoreFiles()">🔍 Verify All Core Files</button>
               <button class="secondary small-btn" onclick="clearErrorAuditLog()">🧹 Clear Error Log</button>
             </div>
           </div>
           <p style="font-size:0.75rem; color:#9ca3af; margin:4px 0 8px 0;">
-            Command the studio to diagnose an issue or run deterministic self-repair. Core files (<code>assistant_server.py</code>, <code>ui_studio.html</code>, <code>Manager.ps1</code>) are strictly protected: AI patches are staged in <code>/self_heal_staging</code> and syntax-checked via <code>py_compile</code> before you approve them!
+            Command the studio to diagnose an issue or run deterministic self-repair. Core files (<code>assistant_server.py</code>, <code>ui_studio.html</code>, <code>manager.py</code>) are strictly protected: AI patches are staged in <code>/self_heal_staging</code> and syntax-checked via <code>py_compile</code> before you approve them!
           </p>
           <div style="display:flex; gap:6px; margin-bottom:8px;">
             <select id="selfheal-target-file" style="width:175px;">
               <option value="assistant_server.py">assistant_server.py</option>
               <option value="ui_studio.html">ui_studio.html</option>
-              <option value="Manager.ps1">Manager.ps1</option>
+              <option value="manager.py">manager.py (Bootstrapper)</option>
               <option value="workspace_config.json">workspace_config.json</option>
             </select>
             <input id="selfheal-cmd-input" placeholder="e.g. Inspect error_audit.log, re-index database, and stage a fix if needed..." style="flex:1;">
@@ -1922,7 +1952,7 @@ print("Sandbox working dir:", os.getcwd())</textarea>
       <div class="tab-pane" id="tab-manual">
         <div class="card" style="margin-bottom:10px; display:flex; justify-content:space-between; align-items:center; gap:10px;">
           <div>
-            <h3>📖 AetherVault Studio v5.4 — Built-In Interactive Manual</h3>
+            <h3>📖 AetherVault Studio v6.8 Bluesky — Built-In Interactive Manual</h3>
             <div style="font-size:0.74rem; color:#9ca3af; margin-top:3px;">
               Indexed into your companion's brain via <code>[[SELF:manual|...]]</code> and readable right here in-app!
             </div>
@@ -1939,7 +1969,7 @@ print("Sandbox working dir:", os.getcwd())</textarea>
       <!-- TAB 6: ABOUT, CREDITS & COPYRIGHT REGISTRY -->
       <div class="tab-pane" id="tab-about">
         <div class="credit-banner">
-          <div style="display:flex; justify-content:center; margin-bottom:8px;"><img src="/logo.svg" style="width:76px; height:76px;" alt="AVS Logo"></div><h2 style="margin:0 0 6px 0; color:#fff;">AetherVault Studio v5.4 (AVS)</h2>
+          <div style="display:flex; justify-content:center; margin-bottom:8px;"><img src="/logo.svg" style="width:76px; height:76px;" alt="AVS Logo"></div><h2 style="margin:0 0 6px 0; color:#fff;">AetherVault Studio v6.8 Bluesky (AVS)</h2>
           <div style="font-size:0.92rem; font-weight:600; color:var(--accent-soft);">
             <svg viewBox="0 0 18 12" width="15" height="10" style="vertical-align:-1px; border-radius:2px; box-shadow:0 0 2px rgba(0,0,0,0.4);" aria-label="Argentina"><rect width="18" height="4" y="0" fill="#74ACDF"/><rect width="18" height="4" y="4" fill="#FFFFFF"/><rect width="18" height="4" y="8" fill="#74ACDF"/><circle cx="9" cy="6" r="1.4" fill="#F6B40E"/></svg> Made with ❤️ in Argentina by Enzeru, with the collaboration of Google Gemini.
           </div>
@@ -2991,7 +3021,7 @@ async function runSystemSelfTest() {
   try {
     const res = await fetch('/diagnostics/selftest');
     const data = await res.json();
-    const lines = ['=== 🩺 AETHERVAULT v5.4 SELF-TEST REPORT ==='];
+    const lines = ['=== 🩺 AETHERVAULT v6.8 SELF-TEST REPORT ==='];
     (data.checks || []).forEach(c => {
       lines.push(`${c.ok ? '✅' : '⚠️'} ${c.system}: ${c.detail}`);
     });
@@ -3438,7 +3468,7 @@ async function refreshStatus() {
         document.getElementById('gdl-stats').innerText = `${d.percent}% (${d.downloaded_mb} / ${d.total_mb} MB) @ ${d.speed_mbps} MB/s | ETA: ${formatEta(d.eta_sec)} | Alive: ${d.elapsed_sec || 0}s`;
         document.getElementById('gdl-bar').style.width = `${Math.max(2, d.percent)}%`;
       }
-      document.title = `[⬇️ ${d.percent}% | ${d.speed_mbps} MB/s] AetherVault Studio v5.4`;
+      document.title = `[⬇️ ${d.percent}% | ${d.speed_mbps} MB/s] AetherVault Studio v6.8 Bluesky`;
       upsertPersistentToast(
         'dl_status',
         'toast-working',
@@ -3449,7 +3479,7 @@ async function refreshStatus() {
     } else {
       if (gdlHud) gdlHud.style.display = 'none';
       if (!data.loading_model && !data.generating) {
-        document.title = 'AetherVault Studio v5.4 — Portable Local AI & OSWorld Workspace';
+        document.title = 'AetherVault Studio v6.8 Bluesky — Portable Local AI & OSWorld Workspace';
       }
       if (wasDownloading) {
         wasDownloading = false;
@@ -3898,6 +3928,13 @@ async function openStudioModal(tabId) {
 
   document.getElementById('cfg-osworld-enabled').checked = cfg.osworld_enabled !== false;
   const tg = cfg.telegram || {};
+  const bs = cfg.bluesky || {};
+  if (document.getElementById('cfg-bsky-handle')) document.getElementById('cfg-bsky-handle').value = bs.handle || '';
+  if (document.getElementById('cfg-bsky-pass')) document.getElementById('cfg-bsky-pass').value = bs.app_password || '';
+  if (document.getElementById('cfg-bsky-allowed')) document.getElementById('cfg-bsky-allowed').value = bs.allowed_dids || '';
+  if (document.getElementById('cfg-bsky-pds')) document.getElementById('cfg-bsky-pds').value = bs.pds_url || 'https://bsky.social';
+  if (document.getElementById('cfg-bsky-enabled')) document.getElementById('cfg-bsky-enabled').checked = !!bs.enabled;
+  if (document.getElementById('cfg-bsky-mentions')) document.getElementById('cfg-bsky-mentions').checked = bs.poll_mentions !== false;
   document.getElementById('cfg-tg-enabled').checked = Boolean(tg.enabled);
   document.getElementById('cfg-tg-token').value = tg.bot_token || '';
   document.getElementById('cfg-tg-chatid').value = tg.allowed_chat_id || '';
@@ -4193,6 +4230,28 @@ async function testMcpHandshake() {
   }
 }
 
+async function sendBlueskyTestPost() {
+  const box = document.getElementById('bsky-status-box');
+  const txt = prompt('Enter a Bluesky post (max 300 chars) to publish now:', 'Online from AetherVault Studio v6.8 Bluesky!');
+  if (!txt || !txt.trim()) return;
+  if (box) { box.style.display = 'block'; box.innerHTML = '⏳ Posting to Bluesky...'; }
+  try {
+    const res = await fetch('/api/bluesky/post', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ text: txt.trim() })
+    });
+    const data = await res.json();
+    if (box) {
+      box.innerHTML = data.ok
+        ? `✅ Posted to Bluesky! URI: <code>${escapeHtml(data.uri || '')}</code>`
+        : `⚠️ <span style="color:#fca5a5;">${escapeHtml(data.error || 'Post failed')}</span>`;
+    }
+  } catch (e) {
+    if (box) box.innerHTML = `❌ <span style="color:#fca5a5;">${escapeHtml(String(e))}</span>`;
+  }
+}
+
 async function saveIntegrationsConfig() {
   const payload = {
     mcp_auth_token: (document.getElementById('cfg-mcp-token') ? document.getElementById('cfg-mcp-token').value.trim() : ''),
@@ -4201,6 +4260,14 @@ async function saveIntegrationsConfig() {
       enabled: document.getElementById('cfg-tg-enabled').checked,
       bot_token: document.getElementById('cfg-tg-token').value.trim(),
       allowed_chat_id: document.getElementById('cfg-tg-chatid').value.trim()
+    },
+    bluesky: {
+      enabled: document.getElementById('cfg-bsky-enabled') ? document.getElementById('cfg-bsky-enabled').checked : false,
+      poll_mentions: document.getElementById('cfg-bsky-mentions') ? document.getElementById('cfg-bsky-mentions').checked : true,
+      handle: document.getElementById('cfg-bsky-handle') ? document.getElementById('cfg-bsky-handle').value.trim() : '',
+      app_password: document.getElementById('cfg-bsky-pass') ? document.getElementById('cfg-bsky-pass').value.trim() : '',
+      pds_url: (document.getElementById('cfg-bsky-pds') && document.getElementById('cfg-bsky-pds').value.trim()) ? document.getElementById('cfg-bsky-pds').value.trim() : 'https://bsky.social',
+      allowed_dids: document.getElementById('cfg-bsky-allowed') ? document.getElementById('cfg-bsky-allowed').value.trim() : ''
     },
     spotify: {
       client_id: document.getElementById('cfg-sp-id').value.trim(),

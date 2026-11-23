@@ -30,6 +30,8 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=PendingDeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
+import ast
+import hashlib
 import gc
 import re
 import time
@@ -122,12 +124,17 @@ except ImportError:
 # =====================================================================
 # 1. PORTABLE PATHS, DIRECTORIES & PERSISTENT WORKSPACE CONFIG
 # =====================================================================
-APP_VERSION = "5.4"
+APP_VERSION = "6.8"
 SERVER_PORT = int(os.environ.get("AVS_PORT", "8000"))
 from avs import platform_bridge as avs_platform
 from avs import toolbox as avs_toolbox
 from avs import workbench as avs_workbench
 from avs import hardware_monitor as avs_hw
+from avs import bridges as avs_bridges
+from avs import turn_pipeline as avs_turn_pipeline
+from avs import model_polish as avs_model_polish
+from avs.contracts import ToolSpec, ToolResult
+from avs import memory_graph as avs_memory_graph
 BASE_DIR = Path(__file__).parent.resolve()
 PDF_DIR = BASE_DIR / "priority_pdfs"
 LORE_SUBDIR = PDF_DIR / "lore"
@@ -296,7 +303,16 @@ DEFAULT_CONFIG = {
     "telegram": {
         "enabled": False,
         "bot_token": "",
-        "allowed_chat_id": ""
+        "allowed_chat_id": "",
+        "miniapp_url": ""
+    },
+    "bluesky": {
+        "enabled": False,
+        "handle": "",
+        "app_password": "",
+        "pds_url": "https://bsky.social",
+        "allowed_dids": "",
+        "poll_mentions": True
     },
     "sd_api_url": "http://127.0.0.1:7860",
     "voice_profile": "af_nicole_river",
@@ -309,6 +325,7 @@ DEFAULT_CONFIG = {
     "workbench_trust": "safe_auto",
     "auto_web_search": True,
     "unrestricted_tokens": True,
+    "idle_unload_minutes": 10,
     "mcp_auth_token": ""
 }
 
@@ -371,6 +388,9 @@ STATE = {
     "current_model": None,
     "gpu_offload": bool(llama_supports_gpu_offload()),
     "loading_model": False,
+    "last_activity_ts": time.time(),
+    "idle_sleeping": False,
+    "last_unloaded_model": "",
     "generating": False,
     "stop_requested": False,
     "current_step": "Idle",
@@ -859,7 +879,18 @@ def init_db():
         c.execute("""CREATE TABLE IF NOT EXISTS dynamic_memory (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         category TEXT, fact TEXT,
-                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)""")
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        active INTEGER DEFAULT 1,
+                        hits INTEGER DEFAULT 1,
+                        norm_key TEXT DEFAULT '')""")
+        c.execute("PRAGMA table_info(dynamic_memory)")
+        dm_cols = {row["name"] for row in c.fetchall()}
+        if "active" not in dm_cols:
+            c.execute("ALTER TABLE dynamic_memory ADD COLUMN active INTEGER DEFAULT 1")
+        if "hits" not in dm_cols:
+            c.execute("ALTER TABLE dynamic_memory ADD COLUMN hits INTEGER DEFAULT 1")
+        if "norm_key" not in dm_cols:
+            c.execute("ALTER TABLE dynamic_memory ADD COLUMN norm_key TEXT DEFAULT ''")
         c.execute("""CREATE TABLE IF NOT EXISTS chat_sessions (
                         id TEXT PRIMARY KEY,
                         title TEXT,
@@ -3605,7 +3636,7 @@ def get_pc_environment_info() -> dict:
         "ram_free_gb": ram.get("free_gb", 0),
         "ram_total_gb": ram.get("total_gb", 0),
         "workspace_dir": str(BASE_DIR),
-        "lan_url": f"http://{get_local_lan_ip()}:8000",
+        "lan_url": f"http://{get_local_lan_ip()}:{SERVER_PORT}",
         "active_brain": brain_desc,
         "brain_mode": WORKSPACE_CFG.get("brain_mode", "local_only"),
         "workspace_mode": WORKSPACE_CFG.get("workspace_mode", "assistant"),
@@ -3862,9 +3893,21 @@ AETHER_TOOL_SCHEMAS = [
     }
 ]
 
+from avs.tool_registry import ToolRegistry as _ToolRegistry
+
+UNIFIED_TOOL_REGISTRY = _ToolRegistry(max_tools=128)
+for _t_schema in AETHER_TOOL_SCHEMAS:
+    _fn_meta = (_t_schema or {}).get("function") or {}
+    _fn_name = (_fn_meta.get("name") or "").strip()
+    if _fn_name:
+        UNIFIED_TOOL_REGISTRY.register(
+            ToolSpec(name=_fn_name, trust_tier="safe_auto", description=(_fn_meta.get("description") or "")[:200]),
+            lambda _n=_fn_name, **kw: execute_unified_tool(_n, kw)[0],
+        )
+
 def execute_unified_tool(tool_name: str, args: dict, session_id: str = "session_main") -> tuple:
     """Executes a native JSON tool call on the host PC and returns (observation_text, img_url, audio_url)."""
-    name = (tool_name or "").strip().lower()
+    name = UNIFIED_TOOL_REGISTRY.resolve_name((tool_name or "").strip().lower())
     args = args if isinstance(args, dict) else {}
     img_url = None
     audio_url = None
@@ -4416,7 +4459,9 @@ def retrieve_relevant_lore(query_text: str, top_k: int = 2) -> tuple:
     if is_capability_or_api_query(query_text) or PRIORITY_CACHE["lore_chunk_count"] == 0:
         return "", []
 
-    query_terms = [t for t in extract_keywords(query_text) if len(t) >= 4]
+    _base_terms = [t for t in extract_keywords(query_text) if len(t) >= 4]
+    _expanded = MEMORY_COMPACTOR.expand_keywords(query_text) if "MEMORY_COMPACTOR" in globals() else _base_terms
+    query_terms = [t for t in _expanded if len(t) >= 4] or _base_terms
     if not query_terms:
         return "", []
 
@@ -5321,6 +5366,8 @@ def load_local_model(filename: str):
                     verbose=False
                 )
             STATE["current_model"] = model_path.name
+            STATE["idle_sleeping"] = False
+            STATE["last_activity_ts"] = time.time()
             WORKSPACE_CFG["last_loaded_model"] = model_path.name
             save_workspace_config(WORKSPACE_CFG)
             print(f"[MODEL LOADER] Loaded {model_path.name} in {time.time() - t0:.1f}s ({accel})")
@@ -5332,6 +5379,55 @@ def load_local_model(filename: str):
     finally:
         STATE["loading_model"] = False
         set_step("Idle")
+
+def unload_local_model(reason: str = "Manual unload") -> dict:
+    """Safely unloads active GGUF weights from RAM/VRAM, runs gc.collect() + SQLite WAL checkpoint, and enters 0-overhead Idle Sleep."""
+    prev_name = STATE.get("current_model") or ""
+    if STATE.get("loading_model") or STATE.get("generating"):
+        return {"ok": False, "message": "Model is currently busy loading or generating."}
+    with LLM_LOCK:
+        if STATE.get("llm") is not None:
+            STATE["llm"] = None
+        if prev_name:
+            STATE["last_unloaded_model"] = prev_name
+        STATE["current_model"] = None
+        STATE["idle_sleeping"] = True
+        gc.collect()
+    try:
+        with get_db() as conn:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except Exception:
+        pass
+    if prev_name:
+        print(f"[IDLE SLEEP] Unloaded '{prev_name}' ({reason}) -> RAM/VRAM freed!", flush=True)
+    return {"ok": True, "unloaded": prev_name, "reason": reason}
+
+def touch_activity(wake_model: bool = False):
+    """Marks activity timestamp; optionally auto-reloads the sleeping GGUF model on demand."""
+    STATE["last_activity_ts"] = time.time()
+    if wake_model and STATE.get("idle_sleeping") and not STATE.get("llm") and not STATE.get("loading_model"):
+        target = STATE.get("last_unloaded_model") or WORKSPACE_CFG.get("last_loaded_model") or pick_lightweight_failsafe_model()
+        if target:
+            STATE["idle_sleeping"] = False
+            load_local_model(target)
+
+def idle_sleep_watchdog():
+    """Background low-power watchdog: unloads GGUF weights after idle_unload_minutes of inactivity so RAM stays free."""
+    while True:
+        try:
+            time.sleep(15)
+            mins = float(WORKSPACE_CFG.get("idle_unload_minutes", 10) or 0)
+            if mins <= 0:
+                continue
+            if STATE.get("llm") is None or STATE.get("loading_model") or STATE.get("generating"):
+                continue
+            if (STATE.get("download") or {}).get("active"):
+                continue
+            idle_sec = time.time() - float(STATE.get("last_activity_ts") or time.time())
+            if idle_sec >= (mins * 60.0):
+                unload_local_model(f"Auto-Sleep after {int(mins)}m idle")
+        except Exception:
+            time.sleep(15)
 
 def download_worker(repo_id: str, filename: str):
     STATE["download"].update({
@@ -5401,7 +5497,7 @@ def download_worker(repo_id: str, filename: str):
 def sync_memory_vault_file():
     with get_db() as conn:
         c = conn.cursor()
-        c.execute("SELECT id, category, fact, timestamp FROM dynamic_memory ORDER BY id DESC")
+        c.execute("SELECT id, category, fact, timestamp FROM dynamic_memory WHERE COALESCE(active, 1) = 1 ORDER BY id DESC")
         rows = c.fetchall()
     vault_file = MEMORY_DIR / "learned_memories.txt"
     lines = [f"[{r['id']}] ({r['category']}) {r['fact']} -- {r['timestamp']}" for r in rows]
@@ -5446,7 +5542,7 @@ def save_to_memory(category: str, fact: str, sync_pseudo: bool = True) -> str:
 
     with get_db() as conn:
         c = conn.cursor()
-        c.execute("SELECT id FROM dynamic_memory WHERE LOWER(fact) = LOWER(?)", (fact,))
+        c.execute("SELECT id FROM dynamic_memory WHERE COALESCE(active, 1) = 1 AND LOWER(fact) = LOWER(?)", (fact,))
         if not c.fetchone():
             c.execute("INSERT INTO dynamic_memory (category, fact) VALUES (?, ?)", (category, fact))
             conn.commit()
@@ -5461,7 +5557,7 @@ def save_to_memory(category: str, fact: str, sync_pseudo: bool = True) -> str:
 def list_memories():
     with get_db() as conn:
         c = conn.cursor()
-        c.execute("SELECT id, category, fact FROM dynamic_memory ORDER BY id DESC LIMIT 30")
+        c.execute("SELECT id, category, fact FROM dynamic_memory WHERE COALESCE(active, 1) = 1 ORDER BY id DESC LIMIT 30")
         return [{"id": r["id"], "category": r["category"], "fact": r["fact"]} for r in c.fetchall()]
 
 def format_memories_for_prompt(limit: int = 12) -> str:
@@ -5567,6 +5663,414 @@ def build_safe_messages(static_sys_prompt: str, dynamic_turn_context: str, recen
         else:
             messages.insert(0, {"role": "user", "content": sys_text})
     return messages
+
+# =====================================================================
+# 8C. v6.8 ULTIMATE GUARDRAILS: BACKGROUND MEMORY COMPACTOR,
+#     LORE ATTRIBUTION REFEREE & BLUESKY AT PROTOCOL BRIDGE
+# =====================================================================
+from difflib import SequenceMatcher as _SeqMatcher
+from collections import defaultdict as _ddict
+
+EXCLUSIVE_MEMORY_CATEGORIES = {"user_name", "user_identity", "user_location", "location", "user_zip", "zip_code"}
+
+def _normalize_mem_fact(text: str) -> str:
+    s = re.sub(r"[^a-z0-9\s]", " ", (text or "").lower())
+    return re.sub(r"\s+", " ", s).strip()
+
+class AetherMemoryCompactor:
+    """
+    Background Python 'pseudo-work' worker:
+    - Deduplicates exact & fuzzy near-duplicate memories in SQLite without calling the LLM.
+    - Supersedes stale single-slot facts (location, name, zip) while keeping audit rows inactive (active=0).
+    - Builds a 1-hop keyword co-occurrence mind-map for entity/lore lookups.
+    """
+    def __init__(self, interval_sec: int = 120):
+        self.interval_sec = max(30, int(interval_sec))
+        self._lock = threading.Lock()
+        self.mind_map: dict = {}
+        self._ensure_columns()
+
+    def _ensure_columns(self):
+        try:
+            with get_db() as conn:
+                cols = {r["name"] for r in conn.execute("PRAGMA table_info(dynamic_memory)").fetchall()}
+                if "active" not in cols:
+                    conn.execute("ALTER TABLE dynamic_memory ADD COLUMN active INTEGER DEFAULT 1")
+                if "hits" not in cols:
+                    conn.execute("ALTER TABLE dynamic_memory ADD COLUMN hits INTEGER DEFAULT 1")
+                if "norm_key" not in cols:
+                    conn.execute("ALTER TABLE dynamic_memory ADD COLUMN norm_key TEXT DEFAULT ''")
+                conn.commit()
+        except Exception:
+            pass
+
+    def compact_now(self, fuzzy_threshold: float = 0.86) -> dict:
+        if not self._lock.acquire(blocking=False):
+            return {"skipped": True}
+        merged = 0
+        superseded = 0
+        try:
+            self._ensure_columns()
+            with get_db() as conn:
+                rows = conn.execute(
+                    "SELECT id, category, fact, COALESCE(hits, 1) AS hits "
+                    "FROM dynamic_memory WHERE COALESCE(active, 1) = 1 ORDER BY id DESC"
+                ).fetchall()
+                seen_excl = set()
+                kept = []
+                for r in rows:
+                    rid = r["id"]
+                    cat = (r["category"] or "active_state").strip()
+                    cat_low = cat.lower()
+                    fact = (r["fact"] or "").strip()
+                    norm = _normalize_mem_fact(fact)
+                    if not norm:
+                        conn.execute("UPDATE dynamic_memory SET active = 0 WHERE id = ?", (rid,))
+                        superseded += 1
+                        continue
+                    if cat_low in EXCLUSIVE_MEMORY_CATEGORIES:
+                        if cat_low in seen_excl:
+                            conn.execute("UPDATE dynamic_memory SET active = 0 WHERE id = ?", (rid,))
+                            superseded += 1
+                            continue
+                        seen_excl.add(cat_low)
+                    dup = None
+                    for k in kept:
+                        if k["norm"] == norm:
+                            dup = k
+                            break
+                        if k["cat_low"] == cat_low and abs(len(k["norm"]) - len(norm)) < 45:
+                            if _SeqMatcher(None, k["norm"], norm).ratio() >= fuzzy_threshold:
+                                dup = k
+                                break
+                    if dup is not None:
+                        best_f = fact if len(fact) > len(dup["fact"]) else dup["fact"]
+                        new_h = int(dup["hits"]) + int(r["hits"] or 1)
+                        dup["fact"] = best_f
+                        dup["norm"] = _normalize_mem_fact(best_f)
+                        dup["hits"] = new_h
+                        conn.execute(
+                            "UPDATE dynamic_memory SET fact = ?, norm_key = ?, hits = ? WHERE id = ?",
+                            (best_f, dup["norm"], new_h, dup["id"])
+                        )
+                        conn.execute("UPDATE dynamic_memory SET active = 0 WHERE id = ?", (rid,))
+                        merged += 1
+                    else:
+                        conn.execute("UPDATE dynamic_memory SET norm_key = ? WHERE id = ?", (norm, rid))
+                        kept.append({"id": rid, "cat_low": cat_low, "fact": fact, "norm": norm, "hits": int(r["hits"] or 1)})
+                conn.commit()
+                try:
+                    conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                except Exception:
+                    pass
+
+            co = _ddict(Counter)
+            for item in kept:
+                kws = list(dict.fromkeys(extract_keywords(item["fact"])))
+                for w in kws:
+                    for peer in kws:
+                        if peer != w:
+                            co[w][peer] += item["hits"]
+            self.mind_map = {w: cnt.most_common(5) for w, cnt in co.items()}
+            return {"merged": merged, "superseded": superseded, "active": len(kept), "links": len(self.mind_map)}
+        finally:
+            self._lock.release()
+
+    def expand_keywords(self, query_text: str) -> list:
+        base = extract_keywords(query_text)
+        out = list(dict.fromkeys(base))
+        for kw in base[:4]:
+            for nb, _ in self.mind_map.get(kw, [])[:2]:
+                if nb not in out:
+                    out.append(nb)
+        return out
+
+MEMORY_COMPACTOR = AetherMemoryCompactor(interval_sec=120)
+
+def _memory_compactor_watchdog():
+    while True:
+        time.sleep(MEMORY_COMPACTOR.interval_sec)
+        if STATE.get("generating") or STATE.get("loading_model"):
+            continue
+        try:
+            res = MEMORY_COMPACTOR.compact_now()
+            if res.get("merged") or res.get("superseded"):
+                sync_memory_vault_file()
+        except Exception:
+            pass
+
+def referee_lore_and_grounding(reply_text: str, user_msg: str, ai_name: str, retrieved_lore: str) -> tuple:
+    """
+    v6.8 Lore Attribution & Tool Grounding Referee:
+    1. Flags when the model claims a 'primary/sole/only' title or unique role for itself/another character
+       that isn't backed by the active CORE persona or retrieved LORE context.
+    2. Strips fake/hallucinated tool-action narration (*opens Spotify*, *scans files*, *runs terminal*)
+       when no real tool ran during the turn.
+    Returns (cleaned_reply, warnings_list).
+    """
+    warnings_out = []
+    out = (reply_text or "").strip()
+    if not out:
+        return out, warnings_out
+
+    has_real_tool_evidence = bool(
+        STATE.get("last_debug", {}).get("osworld_actions")
+        or STATE.get("last_debug", {}).get("pc_files_scanned")
+        or STATE.get("last_debug", {}).get("lore_pulled")
+    )
+    if not has_real_tool_evidence:
+        fake_act_pat = r"(?im)^[\s*]*\*?(?:opens?|launches?|scans?|searches?|executes?|runs?|checks?)\s+(?:spotify|steam|terminal|powershell|files?|browser|osworld)[^*\n]*\*?$"
+        if re.search(fake_act_pat, out):
+            out = re.sub(fake_act_pat, "", out).strip()
+            warnings_out.append("Stripped ungrounded tool-action narration (no tool executed).")
+
+    evidence_pool = f"{PRIORITY_CACHE.get('core_rules_text', '')} {WORKSPACE_CFG.get('persona_prompt', '')} {retrieved_lore}".lower()
+    exclusive_matches = re.findall(r"\b(?:the\s+(?:primary|sole|only|true|original)\s+[a-zA-Z0-9_-]{3,24})\b", out, flags=re.IGNORECASE)
+    for phrase in exclusive_matches:
+        tokens = [t.lower() for t in re.findall(r"[a-zA-Z]{4,}", phrase) if t.lower() not in ("primary", "sole", "only", "true", "original")]
+        if tokens and not any(t in evidence_pool for t in tokens):
+            warnings_out.append(f"Unverified exclusive title '{phrase}' not found in CORE/LORE context.")
+
+    return re.sub(r"\n{3,}", "\n\n", out).strip(), warnings_out
+
+# =====================================================================
+# 8D. v6.8 REDUNDANT GUARDRAIL BLENDER FOR COMPACT MODELS (GEMMA & FRIENDS)
+#     1. Reasoning-Echo & Turn-Leak Stripper (prevents multi-step thought loops)
+#     2. Tool Observation Compactor (keeps high-signal lines inside small ctx)
+#     3. Argument Coercion & Surgical Self-Retry Helper (1 bounded retry)
+#     4. Abrupt-Truncation Detector & Continuation Helper
+# =====================================================================
+def strip_reasoning_and_role_echoes(text: str, ai_name: str = "Aether", user_name: str = "Creator") -> str:
+    """Strips internal <think>/reasoning tags and trailing leaked User/Model turn headers."""
+    if not text:
+        return ""
+    s = re.sub(r"<\|think\|>[\s\S]*?<\|/think\|>", "", text, flags=re.IGNORECASE)
+    s = re.sub(r"<think>[\s\S]*?</think>", "", s, flags=re.IGNORECASE)
+    if "<think>" in s and "</think>" not in s:
+        s = s.split("<think>", 1)[0]
+    s = re.sub(rf"(?im)\n+(?:{re.escape(user_name)}|user|human|model|assistant)\s*:\s*$", "", s)
+    s = re.sub(r"<end_of_turn>|<start_of_turn>.*", "", s, flags=re.IGNORECASE | re.DOTALL)
+    return s.strip()
+
+def compact_tool_observation(raw_obs: str, max_chars: int = 2400, max_lines: int = 45) -> str:
+    """Compacts noisy tool/workbench output so small context windows keep signal over boilerplate."""
+    if not raw_obs:
+        return ""
+    lines = [ln.rstrip() for ln in str(raw_obs).splitlines() if ln.strip()]
+    deduped = []
+    for ln in lines:
+        if not deduped or ln != deduped[-1]:
+            deduped.append(ln)
+    if len(deduped) > max_lines:
+        head_n = max_lines // 2
+        tail_n = max_lines - head_n
+        deduped = deduped[:head_n] + [f"... ({len(lines) - max_lines} middle lines compacted) ..."] + deduped[-tail_n:]
+    out = "\n".join(deduped).strip()
+    if len(out) > max_chars:
+        out = out[:max_chars].rsplit("\n", 1)[0].strip() + f"\n... [Compacted from {len(raw_obs)} chars]"
+    return out
+
+def coerce_primitive_args(args: dict) -> dict:
+    """Coerces common small-model string/int/float/bool/path slips cleanly."""
+    if not isinstance(args, dict):
+        return {}
+    coerced = {}
+    for k, v in args.items():
+        if isinstance(v, str):
+            low = v.strip().lower()
+            if low in ("true", "yes", "on"):
+                coerced[k] = True
+            elif low in ("false", "no", "off"):
+                coerced[k] = False
+            elif re.fullmatch(r"-?\d+", v.strip()):
+                coerced[k] = int(v.strip())
+            elif re.fullmatch(r"-?\d+\.\d+", v.strip()):
+                coerced[k] = float(v.strip())
+            elif re.match(r"^[A-Za-z]:\\[^\n]+$", v.strip()):
+                coerced[k] = v.strip().replace("\\", "/")
+            else:
+                coerced[k] = v
+        else:
+            coerced[k] = v
+    return coerced
+
+def needs_continuation_stitch(reply_text: str) -> bool:
+    """Detects if a non-code reply appears cut off mid-sentence or mid-list."""
+    t = (reply_text or "").strip()
+    if len(t) < 180:
+        return False
+    if t.count("```") % 2 != 0:
+        return True
+    if t.endswith((",", ":", ";", "-", "(", "[", "/", "and", "or", "with", "to", "for", "in")):
+        return True
+    if t[-1] not in ".!?)\"'`”’" and not t.endswith("..."):
+        return True
+    return False
+
+def run_blended_workbench_with_retry(code_str: str, messages: list, max_tokens: int, user_name: str, ai_name: str) -> tuple:
+    """
+    Executes Workbench code with syntax sanitization + 1 bounded surgical self-retry
+    if a SyntaxError/NameError occurs, returning (wb_res_dict, final_code_used).
+    """
+    res = execute_workbench_code(code_str)
+    if res.get("ok"):
+        return res, code_str
+    err_out = str(res.get("output") or "")
+    if any(k in err_out.lower() for k in ("safety gate", "timed out", "empty workbench")):
+        return res, code_str
+    retry_msgs = list(messages) + [
+        {"role": "assistant", "content": f"```workbench\n{code_str}\n```"},
+        {"role": "user", "content": f"Workbench hit: {err_out[:320]}\nFix ONLY the code in a single ```workbench block (or run vault.help() if unsure of a method)."}
+    ]
+    fixed_raw = dispatch_brain_sync(
+        messages=retry_msgs,
+        max_tokens=min(2048, max_tokens),
+        temperature=0.35,
+        top_p=0.9,
+        stop=["<START>", f"\n{user_name}:", "\nUser:", "<end_of_turn>"]
+    )
+    fixed_clean = strip_reasoning_and_role_echoes(fixed_raw, ai_name, user_name)
+    fixed_blocks, _ = extract_workbench_blocks(fixed_clean)
+    if fixed_blocks:
+        res2 = execute_workbench_code(fixed_blocks[0])
+        if res2.get("ok"):
+            return res2, fixed_blocks[0]
+    return res, code_str
+
+# --- Bluesky AT Protocol Bridge (xrpc com.atproto.server / repo / notifications) ---
+BSKY_SESSION_CACHE = {"did": "", "handle": "", "accessJwt": "", "refreshJwt": "", "pds": "", "ts": 0.0}
+BSKY_STATE = {"status": "Disabled", "last_post_uri": "", "last_error": "", "mentions_seen": 0}
+_BSKY_SEEN_URIS = set()
+
+def _bsky_ensure_session(force_refresh: bool = False) -> dict:
+    bcfg = WORKSPACE_CFG.get("bluesky") or {}
+    handle = (bcfg.get("handle") or "").strip()
+    app_pw = (bcfg.get("app_password") or "").strip()
+    pds = (bcfg.get("pds_url") or "https://bsky.social").strip().rstrip("/")
+    if not handle or not app_pw:
+        raise RuntimeError("Bluesky handle or app_password is not configured in Studio Settings.")
+    now = time.time()
+    if (
+        not force_refresh
+        and BSKY_SESSION_CACHE.get("accessJwt")
+        and BSKY_SESSION_CACHE.get("handle") == handle
+        and BSKY_SESSION_CACHE.get("pds") == pds
+        and (now - BSKY_SESSION_CACHE.get("ts", 0.0)) < 1800
+    ):
+        return BSKY_SESSION_CACHE
+
+    r = requests.post(
+        f"{pds}/xrpc/com.atproto.server.createSession",
+        json={"identifier": handle, "password": app_pw},
+        headers={"User-Agent": f"AetherVaultStudio/{APP_VERSION}"},
+        timeout=15,
+    )
+    if r.status_code != 200:
+        raise RuntimeError(f"Bluesky createSession failed (HTTP {r.status_code}): {(r.text or '')[:180]}")
+    data = r.json() or {}
+    BSKY_SESSION_CACHE.update({
+        "did": data.get("did") or "",
+        "handle": data.get("handle") or handle,
+        "accessJwt": data.get("accessJwt") or "",
+        "refreshJwt": data.get("refreshJwt") or "",
+        "pds": pds,
+        "ts": now,
+    })
+    return BSKY_SESSION_CACHE
+
+def post_to_bluesky(text: str, reply_uri: str = "", reply_cid: str = "") -> dict:
+    """Publishes a post (or reply) to Bluesky via AT Protocol `com.atproto.repo.createRecord`."""
+    if STATE.get("offline_mode"):
+        return {"ok": False, "error": "Offline Mode is ON."}
+    clean_txt = (text or "").strip()
+    if not clean_txt:
+        return {"ok": False, "error": "Bluesky post text cannot be empty."}
+    clean_txt = avs_bridges.format_bluesky_post(clean_txt)
+    try:
+        sess = _bsky_ensure_session()
+        from datetime import datetime, timezone
+        created_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        record = avs_bridges.build_bluesky_post_record(clean_txt, created_iso, reply_uri=reply_uri, reply_cid=reply_cid)
+        resp = requests.post(
+            f"{sess['pds']}/xrpc/com.atproto.repo.createRecord",
+            headers={
+                "Authorization": f"Bearer {sess['accessJwt']}",
+                "Content-Type": "application/json",
+                "User-Agent": f"AetherVaultStudio/{APP_VERSION}",
+            },
+            json={
+                "repo": sess["did"],
+                "collection": "app.bsky.feed.post",
+                "record": record,
+            },
+            timeout=15,
+        )
+        if resp.status_code == 401:
+            sess = _bsky_ensure_session(force_refresh=True)
+            resp = requests.post(
+                f"{sess['pds']}/xrpc/com.atproto.repo.createRecord",
+                headers={
+                    "Authorization": f"Bearer {sess['accessJwt']}",
+                    "Content-Type": "application/json",
+                    "User-Agent": f"AetherVaultStudio/{APP_VERSION}",
+                },
+                json={"repo": sess["did"], "collection": "app.bsky.feed.post", "record": record},
+                timeout=15,
+            )
+        resp.raise_for_status()
+        out = resp.json() or {}
+        BSKY_STATE["last_post_uri"] = out.get("uri") or ""
+        BSKY_STATE["last_error"] = ""
+        return {"ok": True, "uri": out.get("uri"), "cid": out.get("cid"), "text": clean_txt}
+    except Exception as e:
+        BSKY_STATE["last_error"] = str(e)
+        return {"ok": False, "error": str(e)}
+
+def bluesky_polling_worker():
+    """Background Bluesky mention watcher (optional, only active when bluesky.enabled & poll_mentions are True)."""
+    while True:
+        try:
+            bcfg = WORKSPACE_CFG.get("bluesky") or {}
+            enabled = bool(bcfg.get("enabled")) and bool(bcfg.get("poll_mentions", True)) and not STATE.get("offline_mode")
+            if not enabled or not (bcfg.get("handle") or "").strip() or not (bcfg.get("app_password") or "").strip():
+                BSKY_STATE["status"] = "Disabled"
+                time.sleep(6)
+                continue
+            sess = _bsky_ensure_session()
+            BSKY_STATE["status"] = f"Connected (@{sess.get('handle')})"
+            r = requests.get(
+                f"{sess['pds']}/xrpc/app.bsky.notification.listNotifications",
+                params={"limit": 15},
+                headers={"Authorization": f"Bearer {sess['accessJwt']}"},
+                timeout=15,
+            )
+            if r.status_code == 200:
+                notifs = (r.json() or {}).get("notifications") or []
+                allowed_raw = (bcfg.get("allowed_dids") or "").strip()
+                allowed_set = {x.strip().lower() for x in re.split(r"[,;\s]+", allowed_raw) if x.strip()}
+                for n in reversed(notifs):
+                    if (n.get("reason") or "") != "mention":
+                        continue
+                    uri = n.get("uri") or ""
+                    cid = n.get("cid") or ""
+                    author = n.get("author") or {}
+                    did = (author.get("did") or "").strip().lower()
+                    handle_a = (author.get("handle") or "").strip().lower()
+                    if not uri or uri in _BSKY_SEEN_URIS:
+                        continue
+                    _BSKY_SEEN_URIS.add(uri)
+                    if allowed_set and did not in allowed_set and handle_a not in allowed_set:
+                        continue
+                    txt = (((n.get("record") or {}).get("text")) or "").strip()
+                    if txt:
+                        BSKY_STATE["mentions_seen"] = int(BSKY_STATE.get("mentions_seen") or 0) + 1
+                        reply_txt, _, _ = generate_sync_reply_for_telegram(txt, session_id=f"bsky_{did[:24]}")
+                        post_to_bluesky(reply_txt, reply_uri=uri, reply_cid=cid)
+            time.sleep(25)
+        except Exception as e:
+            BSKY_STATE["status"] = f"Standby ({type(e).__name__})"
+            BSKY_STATE["last_error"] = str(e)
+            time.sleep(20)
 
 def has_repetition_delirium(text: str) -> bool:
     """Detects genuine visible repetition loops while ignoring DeepSeek <think> reasoning blocks."""
@@ -6105,13 +6609,72 @@ def _tg_edit_or_send_status(token: str, chat_id: str, status_msg_id: int, text: 
     sent = _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": clean_t}, timeout=10)
     return ((sent.get("result") or {}).get("message_id")) or status_msg_id
 
+_TG_REGISTERED_TOKENS = set()
+
+TELEGRAM_BOT_COMMANDS = [
+    {"command": "menu", "description": "🎛️ Open AetherVault Quick Control Panel"},
+    {"command": "status", "description": "📊 Check active model, RAM & mode"},
+    {"command": "specs", "description": "🖥️ Deep hardware & GPU/VRAM specs"},
+    {"command": "queue", "description": "📥 Check Telegram worker queue"},
+    {"command": "unload", "description": "💤 Unload model to free RAM/VRAM"},
+    {"command": "wake", "description": "⚡ Wake sleeping GGUF model"},
+    {"command": "stop", "description": "⏹️ Stop active generation"},
+    {"command": "update", "description": "🔄 Pull GitHub OTA update"},
+    {"command": "help", "description": "📖 Show all commands"},
+]
+
+def _tg_build_control_keyboard() -> dict:
+    """Builds an interactive Telegram inline button panel (plus Mini App button if HTTPS tunnel URL is set)."""
+    lan_url = f"http://{get_local_lan_ip()}:{SERVER_PORT}"
+    miniapp_url = (WORKSPACE_CFG.get("telegram", {}).get("miniapp_url") or "").strip()
+    rows = [
+        [
+            {"text": "📊 Status", "callback_data": "avs_cmd:/status"},
+            {"text": "🖥️ Specs", "callback_data": "avs_cmd:/specs"},
+            {"text": "📥 Queue", "callback_data": "avs_cmd:/queue"},
+        ],
+        [
+            {"text": "💤 Unload RAM", "callback_data": "avs_cmd:/unload"},
+            {"text": "⚡ Wake Model", "callback_data": "avs_cmd:/wake"},
+            {"text": "⏹️ Stop", "callback_data": "avs_cmd:/stop"},
+        ],
+        [
+            {"text": "📸 Screenshot", "callback_data": "avs_tool:screenshot"},
+            {"text": "🎵 Now Playing", "callback_data": "avs_tool:spotify_current"},
+            {"text": "🔄 OTA Update", "callback_data": "avs_cmd:/update"},
+        ],
+    ]
+    if miniapp_url.startswith("https://"):
+        rows.append([{"text": "🚀 Open Studio Mini App", "web_app": {"url": miniapp_url}}])
+    else:
+        rows.append([{"text": f"📱 Wi-Fi LAN: {lan_url}", "callback_data": "avs_info:lan"}])
+    return {"inline_keyboard": avs_bridges.build_telegram_control_rows(lan_url, miniapp_url)}
+
+def _tg_register_bot_commands(token: str):
+    """Registers native `/` autocomplete menu commands & chat menu button with Telegram Bot API."""
+    if not token or token in _TG_REGISTERED_TOKENS:
+        return
+    res = _tg_api_post(token, "setMyCommands", {"commands": TELEGRAM_BOT_COMMANDS}, timeout=10)
+    miniapp_url = (WORKSPACE_CFG.get("telegram", {}).get("miniapp_url") or "").strip()
+    if miniapp_url.startswith("https://"):
+        _tg_api_post(token, "setChatMenuButton", {
+            "menu_button": {"type": "web_app", "text": "Studio", "web_app": {"url": miniapp_url}}
+        }, timeout=10)
+    else:
+        _tg_api_post(token, "setChatMenuButton", {"menu_button": {"type": "commands"}}, timeout=10)
+    if res.get("ok"):
+        _TG_REGISTERED_TOKENS.add(token)
+
 def _tg_send_media(token: str, chat_id: str, img_url: str = None, audio_url: str = None):
     if img_url:
         img_path = GEN_IMG_DIR / Path(img_url).name
         if img_path.exists():
             try:
                 with open(img_path, "rb") as f:
-                    requests.post(f"https://api.telegram.org/bot{token}/sendPhoto", data={"chat_id": chat_id}, files={"photo": f}, timeout=25)
+                    resp_p = requests.post(f"https://api.telegram.org/bot{token}/sendPhoto", data={"chat_id": chat_id}, files={"photo": f}, timeout=25)
+                if resp_p.status_code != 200:
+                    with open(img_path, "rb") as f2:
+                        requests.post(f"https://api.telegram.org/bot{token}/sendDocument", data={"chat_id": chat_id}, files={"document": f2}, timeout=25)
             except Exception:
                 pass
     if audio_url:
@@ -6125,7 +6688,7 @@ def _tg_send_media(token: str, chat_id: str, img_url: str = None, audio_url: str
 
 def generate_sync_reply_for_telegram(user_text: str, session_id: str = "telegram_session", progress_cb=None) -> tuple:
     """
-    Robust v5.4 Telegram Brain + Live Python Workbench Engine:
+    Robust v6.8 Telegram Brain + Live Python Workbench Engine:
     - Works across Local GGUF, Smart API Waterfall, and Hybrid modes.
     - Streams live step progress to Telegram ('Working in Workbench...') AND the main Studio UI top bar.
     - Never crashes the polling thread on malformed outputs or empty replies.
@@ -6146,6 +6709,9 @@ def generate_sync_reply_for_telegram(user_text: str, session_id: str = "telegram
     b_mode = WORKSPACE_CFG.get("brain_mode", "local_only")
     has_api_slots = bool([s for s in load_api_vault().get("slots", []) if s.get("enabled", True)])
     can_use_api = (b_mode in ("smart_api", "hybrid")) and has_api_slots and not STATE["offline_mode"]
+    if not STATE["llm"] and not can_use_api and STATE.get("idle_sleeping"):
+        _notify("💤 Waking sleeping GGUF model back into RAM/VRAM...")
+        touch_activity(wake_model=True)
     if not STATE["llm"] and not can_use_api:
         target_m = pick_lightweight_failsafe_model() if (b_mode == "hybrid" or STATE["performance_mode"] == "Laptop 2015 (Fast)") else (WORKSPACE_CFG.get("last_loaded_model") or pick_lightweight_failsafe_model())
         if target_m:
@@ -6230,7 +6796,7 @@ def generate_sync_reply_for_telegram(user_text: str, session_id: str = "telegram
             messages = build_safe_messages(static_sys, dyn_ctx, recent_turns, max_turns=6)
             cfg = get_governor_settings("deep", sum(len(m["content"]) for m in messages))
             reply = ""
-            max_rounds = 4 if is_unrestricted_tokens_enabled() else 2
+            max_rounds = avs_turn_pipeline.bounded_rounds(4 if is_unrestricted_tokens_enabled() else 2)
             for r_idx in range(max_rounds):
                 if STATE["stop_requested"]:
                     break
@@ -6248,7 +6814,7 @@ def generate_sync_reply_for_telegram(user_text: str, session_id: str = "telegram
                 if wb_blocks:
                     for wb_i, wb_code in enumerate(wb_blocks):
                         _notify(f"🐍 Working in Python Workbench (Round {r_idx+1}, Step {wb_i+1})...")
-                        wb_res = execute_workbench_code(wb_code)
+                        wb_res, _ = run_blended_workbench_with_retry(wb_code, messages, cfg["max_tokens"], usr_n, ai_n)
                         obs_list.append(wb_res.get("output") or "")
                         if wb_res.get("image_url"):
                             img_out = wb_res["image_url"]
@@ -6257,7 +6823,7 @@ def generate_sync_reply_for_telegram(user_text: str, session_id: str = "telegram
                 elif inline_calls:
                     for ic in inline_calls:
                         _notify(f"🔧 Running tool '{ic['name']}' (Round {r_idx+1})...")
-                        o_txt, t_i, t_a = execute_unified_tool(ic["name"], ic["arguments"], session_id)
+                        o_txt, t_i, t_a = execute_unified_tool(ic["name"], coerce_primitive_args(ic["arguments"]), session_id)
                         obs_list.append(o_txt)
                         if t_i:
                             img_out = t_i
@@ -6265,7 +6831,7 @@ def generate_sync_reply_for_telegram(user_text: str, session_id: str = "telegram
                             aud_out = t_a
 
                 if obs_list and r_idx < (max_rounds - 1):
-                    joined_obs = "\n\n".join(obs_list)[:4500]
+                    joined_obs = compact_tool_observation("\n\n".join(obs_list), max_chars=3200, max_lines=50)
                     messages.append({"role": "assistant", "content": round_raw})
                     messages.append({"role": "user", "content": f"[WORKBENCH EXECUTION OUTPUT]:\n{joined_obs}\n\nNow reply naturally to {usr_n} as {ai_n} using these exact results."})
                     continue
@@ -6273,7 +6839,11 @@ def generate_sync_reply_for_telegram(user_text: str, session_id: str = "telegram
                 reply = cleaned_round or wb_cleaned or stripped
                 break
 
+        reply = avs_model_polish.normalize_model_output(reply, ai_name=ai_n, user_name=usr_n, is_assistant_mode=(WORKSPACE_CFG.get("workspace_mode") == "assistant"))
         reply = clean_assistant_theatrics(reply, is_assistant_mode=(WORKSPACE_CFG.get("workspace_mode") == "assistant"))
+        _fin = avs_turn_pipeline.finalize_turn_reply(reply, ai_name=ai_n, user_name=usr_n, evidence_pool=f"{PRIORITY_CACHE.get('core_rules_text', '')} {WORKSPACE_CFG.get('persona_prompt', '')}")
+        reply = _fin["reply"]
+        reply, _ref_warns = referee_lore_and_grounding(reply, user_text, ai_n, "")
         if not reply:
             reply = "✅ Done."
         update_partner_evolution(user_text, reply)
@@ -6310,6 +6880,7 @@ def telegram_polling_worker():
             if token not in _TG_WEBHOOK_CLEARED_TOKENS:
                 _tg_api_post(token, "deleteWebhook", {"drop_pending_updates": False}, timeout=8)
                 _TG_WEBHOOK_CLEARED_TOKENS.add(token)
+            _tg_register_bot_commands(token)
 
             STATE["telegram_status"] = "Connected (Polling)"
             TELEGRAM_QUEUE_STATE["last_error"] = ""
@@ -6329,10 +6900,24 @@ def telegram_polling_worker():
                 uid = int(u.get("update_id") or 0)
                 if uid > max_uid:
                     max_uid = uid
+                cb = u.get("callback_query")
+                if cb:
+                    cb_id = cb.get("id")
+                    cb_data = (cb.get("data") or "").strip()
+                    cb_chat = str(((cb.get("message") or {}).get("chat") or {}).get("id") or "")
+                    if cb_id:
+                        _tg_api_post(token, "answerCallbackQuery", {"callback_query_id": cb_id}, timeout=6)
+                    if cb_chat and cb_data:
+                        pending_msgs.append((cb_chat, cb_data))
+                    continue
                 msg = u.get("message") or u.get("edited_message") or {}
                 chat_id = str((msg.get("chat") or {}).get("id") or "")
                 text = (msg.get("text") or msg.get("caption") or "").strip()
                 if text and chat_id:
+                    if text.startswith("/"):
+                        parts_cmd = text.split(None, 1)
+                        parts_cmd[0] = parts_cmd[0].split("@")[0]
+                        text = " ".join(parts_cmd)
                     pending_msgs.append((chat_id, text))
 
             if max_uid > int(STATE["telegram_last_update_id"]):
@@ -6351,24 +6936,50 @@ def telegram_polling_worker():
                     continue
 
                 low_t = text.lower()
-                if low_t in ("/start", "/help"):
+                if low_t in ("/start", "/help", "/menu", "/panel"):
                     ai_n = WORKSPACE_CFG.get("ai_name", "Aether")
+                    lan_u = f"http://{get_local_lan_ip()}:{SERVER_PORT}"
                     _tg_api_post(token, "sendMessage", {
                         "chat_id": chat_id,
                         "text": (
-                            f"⚡ {ai_n} connected via AetherVault Studio v{APP_VERSION}!\n"
-                            f"Your Telegram Chat ID: {chat_id}\n"
-                            f"Commands: /status, /specs, /queue, /stop, /update, /py <code>, or chat naturally with full Python Workbench access!"
-                        )
+                            f"⚡ {ai_n} Control Panel (v{APP_VERSION})\n"
+                            f"• Chat ID: {chat_id}\n"
+                            f"• Home Wi-Fi Web UI: {lan_u}\n"
+                            f"Tap a quick action below or send any message/command:"
+                        ),
+                        "reply_markup": _tg_build_control_keyboard()
                     }, timeout=10)
                     continue
+
+                if text.startswith("avs_info:lan"):
+                    lan_u = f"http://{get_local_lan_ip()}:{SERVER_PORT}"
+                    _tg_api_post(token, "sendMessage", {
+                        "chat_id": chat_id,
+                        "text": f"📱 Open this in Safari/Chrome on your phone while on home Wi-Fi:\n{lan_u}\n\n💡 Want an in-Telegram Mini App button? Run 'cloudflared tunnel --url http://127.0.0.1:{SERVER_PORT}' and paste the https:// link into Studio Settings -> Integrations -> Mini App URL."
+                    }, timeout=10)
+                    continue
+
+                if text.startswith("avs_tool:"):
+                    t_act = text.split(":", 1)[1].strip()
+                    if t_act == "screenshot":
+                        res_s = execute_osworld_action("screenshot", "")
+                        _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": res_s.get("summary") or "Captured screenshot."}, timeout=10)
+                        _tg_send_media(token, chat_id, img_url=res_s.get("image_url"))
+                    elif t_act == "spotify_current":
+                        sp_out = control_spotify("current_track", "")
+                        _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": f"🎵 {sp_out}"}, timeout=10)
+                    continue
+
+                if text.startswith("avs_cmd:"):
+                    text = text.split(":", 1)[1].strip()
+                    low_t = text.lower()
 
                 if low_t == "/stop":
                     STATE["stop_requested"] = True
                     _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": "⏹️ Stop signal sent to active generation."}, timeout=10)
                     continue
 
-                if low_t in ("/status", "/specs", "/queue", "/update") or low_t.startswith(("/py ", "/toggle ", "/inject ", "/log")):
+                if low_t in ("/status", "/specs", "/queue", "/update", "/unload", "/wake") or low_t.startswith("/sleep") or low_t.startswith(("/py ", "/toggle ", "/inject ", "/log")):
                     term_res = api_terminal_exec({"command": "/telegram" if low_t == "/queue" else text})
                     _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": (term_res.get("output") or "Done")[:4000]}, timeout=15)
                     continue
@@ -6391,8 +7002,8 @@ def telegram_polling_worker():
                     reply, img_url, aud_url = generate_sync_reply_for_telegram(text, session_id=f"telegram_{chat_id}", progress_cb=_on_tg_progress)
                     if status_mid:
                         _tg_api_post(token, "deleteMessage", {"chat_id": chat_id, "message_id": status_mid}, timeout=6)
-                    for chunk_start in range(0, len(reply), 3950):
-                        _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": reply[chunk_start:chunk_start + 3950]}, timeout=15)
+                    for _tg_part in avs_bridges.chunk_telegram_message(reply):
+                        _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": _tg_part}, timeout=15)
                     _tg_send_media(token, chat_id, img_url=img_url, audio_url=aud_url)
                     TELEGRAM_QUEUE_STATE["processed_count"] = int(TELEGRAM_QUEUE_STATE.get("processed_count") or 0) + 1
                 finally:
@@ -6512,6 +7123,9 @@ def _background_boot_sequence():
         sync_priority_files(force=False)
         sync_pseudo_memory_and_index()
         threading.Thread(target=telegram_polling_worker, daemon=True).start()
+        threading.Thread(target=idle_sleep_watchdog, daemon=True).start()
+        threading.Thread(target=_memory_compactor_watchdog, daemon=True).start()
+        threading.Thread(target=bluesky_polling_worker, daemon=True).start()
 
         boot_models = list_local_models()
         b_mode = WORKSPACE_CFG.get("brain_mode", "local_only")
@@ -6594,7 +7208,7 @@ def get_status():
     return {
         "config": WORKSPACE_CFG,
         "lan_ip": get_local_lan_ip(),
-        "lan_url": f"http://{get_local_lan_ip()}:8000",
+        "lan_url": f"http://{get_local_lan_ip()}:{SERVER_PORT}",
         "models": list_local_models(),
         "model_bag": MODEL_BAG,
         "specialist_bag": SPECIALIST_MODEL_BAG,
@@ -6611,6 +7225,9 @@ def get_status():
         "current_model": STATE["current_model"],
         "gpu_offload": STATE["gpu_offload"],
         "loading_model": STATE["loading_model"],
+        "idle_sleeping": bool(STATE.get("idle_sleeping", False)),
+        "last_unloaded_model": STATE.get("last_unloaded_model", ""),
+        "idle_unload_minutes": int(WORKSPACE_CFG.get("idle_unload_minutes", 10)),
         "generating": STATE["generating"],
         "current_step": STATE["current_step"],
         "offline_mode": STATE["offline_mode"],
@@ -6627,6 +7244,8 @@ def get_status():
         "api_templates": API_PROVIDER_TEMPLATES,
         "telegram_status": STATE["telegram_status"],
         "telegram_queue": TELEGRAM_QUEUE_STATE,
+        "bluesky": BSKY_STATE,
+        "mind_map_nodes": len(MEMORY_COMPACTOR.mind_map),
         "ram": get_system_ram_info(),
         "download": STATE["download"],
         "pdf_details": file_info,
@@ -6748,6 +7367,17 @@ def api_terminal_exec(payload: dict):
             "  /tunnel                   Check remote tunnel status & mobile access guide\n"
             "  /sh <shell_cmd>           Run host shell command (requires Full PC trust)"
         )}
+    if cmd == "/unload":
+        res_u = unload_local_model("Terminal /unload")
+        return {"ok": res_u.get("ok", True), "output": f"[IDLE SLEEP] Unloaded '{res_u.get('unloaded') or 'none'}' — RAM/VRAM freed!"}
+    if cmd == "/wake":
+        touch_activity(wake_model=True)
+        return {"ok": True, "output": f"[WAKE] Active model: {STATE.get('current_model') or 'None'}"}
+    if cmd == "/sleep":
+        mins_v = int(arg) if arg.isdigit() else int(WORKSPACE_CFG.get("idle_unload_minutes", 10))
+        WORKSPACE_CFG["idle_unload_minutes"] = max(0, min(240, mins_v))
+        save_workspace_config(WORKSPACE_CFG)
+        return {"ok": True, "output": f"[IDLE WATCHDOG] Auto-unload after {WORKSPACE_CFG['idle_unload_minutes']} min(s) idle (0 = disabled)."}
     if cmd == "/telegram":
         return {"ok": True, "output": f"[TELEGRAM BRIDGE] Status: {STATE.get('telegram_status')} | Active: {TELEGRAM_QUEUE_STATE.get('active')} | Queued: {TELEGRAM_QUEUE_STATE.get('queued')} | Step: {TELEGRAM_QUEUE_STATE.get('last_step')}"}
     if cmd == "/status":
@@ -6831,10 +7461,13 @@ def api_ota_update():
     updated = []
     stock_dir = BASE_DIR / "stock_vault"
     stock_dir.mkdir(parents=True, exist_ok=True)
+    frozen_bootstrappers = {"Launch.bat", "Launch.sh", "manager.py"}
     for rel_path, expected_sha in files.items():
         if ".." in rel_path or rel_path.startswith("/"):
             continue
         dest = (BASE_DIR / rel_path).resolve()
+        if rel_path in frozen_bootstrappers and dest.exists():
+            continue
         if BASE_DIR.resolve() not in dest.parents and dest != BASE_DIR.resolve():
             continue
         if dest.exists() and expected_sha and hashlib.sha256(dest.read_bytes()).hexdigest() == expected_sha:
@@ -6971,7 +7604,7 @@ async def mcp_jsonrpc(request: Request):
 def get_about_info():
     return {
         "project_name": "AetherVault Studio",
-        "version": f"v{APP_VERSION} Evergreen (Mobile Studio, SpecPulse & OTA Edition)",
+        "version": f"v{APP_VERSION} Bluesky (Modular Guardrails, Workbench & AT Protocol Edition)",
         "credits": "Made with ❤️ in Argentina by Enzeru, with the collaboration of Google Gemini.",
         "legal_addendum": (
             "All rights reserved to their respective owners. Every Python package (pip module) installed by the user, "
@@ -7001,6 +7634,7 @@ def update_config(payload: dict):
             WORKSPACE_CFG[k] = v
     WORKSPACE_CFG["first_boot_completed"] = True
     save_workspace_config(WORKSPACE_CFG)
+    _TG_REGISTERED_TOKENS.clear()
 
     # Immediately update the first greeting message in session_main if user changed greeting_message
     new_greeting = (payload.get("greeting_message") or "").strip()
@@ -7372,6 +8006,28 @@ def set_performance(payload: dict):
                 threading.Thread(target=load_local_model, args=(STATE["current_model"],), daemon=True).start()
     return {"performance_mode": STATE["performance_mode"]}
 
+@app.post("/api/memories/compact")
+def api_compact_memories():
+    res = MEMORY_COMPACTOR.compact_now()
+    sync_memory_vault_file()
+    return {"ok": True, **res}
+
+@app.post("/api/bluesky/post")
+def api_bluesky_post(payload: dict):
+    return post_to_bluesky(str(payload.get("text") or ""), str(payload.get("reply_uri") or ""), str(payload.get("reply_cid") or ""))
+
+@app.post("/unload_model")
+def api_unload_model():
+    return unload_local_model("Manual unload from Studio UI")
+
+@app.post("/set_idle_sleep")
+def api_set_idle_sleep(payload: dict):
+    mins = max(0, min(240, int(payload.get("minutes", 10))))
+    WORKSPACE_CFG["idle_unload_minutes"] = mins
+    save_workspace_config(WORKSPACE_CFG)
+    STATE["last_activity_ts"] = time.time()
+    return {"ok": True, "idle_unload_minutes": mins}
+
 @app.post("/select_model")
 def select_model(payload: dict):
     filename = payload.get("filename")
@@ -7563,6 +8219,7 @@ def chat_stream(payload: dict):
         ai_name = WORKSPACE_CFG.get("ai_name", "Aether")
         user_name = WORKSPACE_CFG.get("user_name", "Creator")
         STATE["stop_requested"] = False
+        STATE["last_activity_ts"] = time.time()
         STATE["last_debug"] = {
             "timestamp": time.strftime("%H:%M:%S"),
             "model": STATE["current_model"] or "None",
@@ -7587,6 +8244,9 @@ def chat_stream(payload: dict):
             b_mode = WORKSPACE_CFG.get("brain_mode", "local_only")
             has_api_slots = bool([s for s in load_api_vault().get("slots", []) if s.get("enabled", True)])
             can_use_api = (b_mode in ("smart_api", "hybrid")) and has_api_slots and not STATE["offline_mode"]
+            if not STATE["llm"] and not can_use_api and STATE.get("idle_sleeping"):
+                yield json.dumps({"type": "step", "text": "💤 Waking sleeping GGUF model back into RAM/VRAM..."}) + "\n"
+                touch_activity(wake_model=True)
             if not STATE["llm"] and not can_use_api:
                 target_m = pick_lightweight_failsafe_model() if (b_mode == "hybrid" or STATE["performance_mode"] == "Laptop 2015 (Fast)") else (WORKSPACE_CFG.get("last_loaded_model") or pick_lightweight_failsafe_model())
                 if target_m:
@@ -7676,11 +8336,15 @@ def chat_stream(payload: dict):
                 escalated_to_deep = False
 
                 if True:
+                    _g1_hints = avs_model_polish.provider_profile_hints(
+                        STATE.get("active_api_label") or STATE.get("current_model") or WORKSPACE_CFG.get("brain_mode", ""),
+                        WORKSPACE_CFG.get("workspace_mode", "assistant")
+                    )
                     stream_iter = dispatch_brain_stream(
                         messages=messages,
                         max_tokens=cfg["max_tokens"],
-                        temperature=0.75,
-                        top_p=0.92,
+                        temperature=_g1_hints["temperature"],
+                        top_p=_g1_hints["top_p"],
                         min_p=0.12,
                         repeat_penalty=1.15,
                         stop=["<START>", f"\n{user_name}:", "\nUser:", "[INST]", "[/INST]"]
@@ -7756,6 +8420,11 @@ def chat_stream(payload: dict):
                         r_out = search_web(rq)[:1400]
                         yield json.dumps({"type": "workbench_io", "tool": "uncertainty_web_rescue", "code": f"vault.web({rq!r})", "output": r_out[:900]}) + "\n"
                         clean_reflex = synthesize_tool_followup(reflex_sys, recent_turns[-3:], clean_reflex, f"[Auto-Web Knowledge Rescue Results for '{rq}']:\n{r_out}", cfg, user_name, ai_name)
+                    _is_asst_g1 = (WORKSPACE_CFG.get("workspace_mode", "assistant") == "assistant")
+                    clean_reflex = avs_model_polish.normalize_model_output(clean_reflex, ai_name=ai_name, user_name=user_name, is_assistant_mode=_is_asst_g1)
+                    _g1_fin = avs_turn_pipeline.finalize_turn_reply(clean_reflex, ai_name=ai_name, user_name=user_name, evidence_pool=f"{PRIORITY_CACHE.get('core_rules_text', '')} {WORKSPACE_CFG.get('persona_prompt', '')}")
+                    clean_reflex, _g1_warns = referee_lore_and_grounding(_g1_fin["reply"], user_msg, ai_name, "")
+                    STATE["last_debug"]["referee_warnings"] = _g1_warns
                     update_partner_evolution(user_msg, clean_reflex)
                     if STATE["stop_requested"]:
                         clean_reflex = f"{clean_reflex} *(⏹️ Stopped)*".strip()
@@ -8039,11 +8708,16 @@ def chat_stream(payload: dict):
                     round_finish_reason = None
                     delirium_hit = False
 
+                    _g2_hints = avs_model_polish.provider_profile_hints(
+                        STATE.get("active_api_label") or STATE.get("current_model") or WORKSPACE_CFG.get("brain_mode", ""),
+                        WORKSPACE_CFG.get("workspace_mode", "assistant")
+                    )
+                    _g2_temp = (_g2_hints["temperature"] if (agent_round > 0 or is_gauntlet_req) else min(0.42, _g2_hints["temperature"])) if is_operator else _g2_hints["temperature"]
                     stream_iter = dispatch_brain_stream(
                         messages=agent_messages,
                         max_tokens=cfg["max_tokens"],
-                        temperature=(0.76 if (agent_round > 0 or is_gauntlet_req) else 0.38) if is_operator else 0.78,
-                        top_p=0.92 if is_operator else 0.95,
+                        temperature=_g2_temp,
+                        top_p=_g2_hints["top_p"],
                         min_p=0.12,
                         repeat_penalty=1.15,
                         stop=["<START>", f"\n{user_name}:", "\nUser:", "[INST]", "[/INST]"],
@@ -8160,7 +8834,7 @@ def chat_stream(payload: dict):
                                     any_auto_researched = True
                                     yield emit_step("🌐 Workbench hit an error -> Auto-researched online docs to help self-correct!")
                             else:
-                                obs_txt, t_img, t_aud = execute_unified_tool(pc["name"], pc["arguments"], session_id)
+                                obs_txt, t_img, t_aud = execute_unified_tool(pc["name"], coerce_primitive_args(pc["arguments"]), session_id)
                             if pc["name"] == "web_search" or (pc["name"] == "run_workbench" and any(wk in code_preview for wk in ("vault.web(", "vault.docs(", "vault.search("))):
                                 web_searched_this_turn = True
                             yield json.dumps({
@@ -8176,7 +8850,7 @@ def chat_stream(payload: dict):
                                 generated_img_url = t_img
                             if t_aud:
                                 generated_audio_url = t_aud
-                            obs_blocks.append(f"[TOOL RESULT: {pc['name']}]\n{obs_txt[:obs_char_cap]}")
+                            obs_blocks.append(f"[TOOL RESULT: {pc['name']}]\n{avs_turn_pipeline.compact_observations([obs_txt], max_chars=obs_char_cap)}")
 
                         # Duplicate-failure loop breaker so a small model never retries the exact same broken snippet twice
                         if any_tool_failed and round_fail_sig and round_fail_sig == last_failed_wb_sig:
@@ -8426,7 +9100,14 @@ def chat_stream(payload: dict):
                             ai_name
                         )
 
-                    full_reply = clean_assistant_theatrics(full_reply, is_assistant_mode=(WORKSPACE_CFG.get("workspace_mode", "assistant") == "assistant"))
+                    _is_asst_g2 = (WORKSPACE_CFG.get("workspace_mode", "assistant") == "assistant")
+                    full_reply = avs_model_polish.normalize_model_output(full_reply, ai_name=ai_name, user_name=user_name, is_assistant_mode=_is_asst_g2)
+                    full_reply = clean_assistant_theatrics(full_reply, is_assistant_mode=_is_asst_g2)
+                    _g2_ev = f"{PRIORITY_CACHE.get('core_rules_text', '')} {WORKSPACE_CFG.get('persona_prompt', '')} {retrieved_lore if 'retrieved_lore' in locals() else ''}"
+                    _g2_fin = avs_turn_pipeline.finalize_turn_reply(full_reply, ai_name=ai_name, user_name=user_name, evidence_pool=_g2_ev)
+                    full_reply, _g2_warns = referee_lore_and_grounding(_g2_fin["reply"], user_msg, ai_name, retrieved_lore if 'retrieved_lore' in locals() else "")
+                    STATE["last_debug"]["referee_warnings"] = _g2_warns
+                    STATE["last_debug"]["model_family"] = _g2_hints.get("family", "general") if "_g2_hints" in locals() else "general"
                     if STATE["stop_requested"]:
                         full_reply = f"{full_reply} *(⏹️ Stopped)*".strip()
                     if not full_reply:
@@ -8484,7 +9165,7 @@ PREDETERMINED_ERRORS["ERR_VULKAN_LEGACY_APU"] = {
     "code": "ERR-13",
     "title": "Vulkan GPU Driver Incompatible (Auto-Switched to Safe CPU Mode)",
     "message": "Your GPU/APU driver (e.g. legacy AMD Radeon R5/R7 or older integrated graphics) rejected Vulkan offload, so AetherVault automatically switched to Safe CPU Mode.",
-    "fix": "In Manager.ps1, select Option [2] -> [B] (2015 Laptop Safe CPU Build), set Governor to 'Laptop 2015 (Fast)', and refer to Section 6 of the Built-In Manual (📖 Manual button) for legacy hardware tuning."
+    "fix": "In the Bootstrapper (manager.py), click 'Switch Engine (Vulkan GPU vs Safe CPU)' -> Safe CPU Build, set Governor to 'Laptop 2015 (Fast)', and refer to Section 4 of the Built-In Manual (📖 Manual button) for legacy hardware tuning."
 }
 PREDETERMINED_ERRORS["ERR_HARDWARE_BELOW_SPEC"] = {
     "code": "ERR-14",
@@ -8855,7 +9536,8 @@ def execute_self_inspection_tool(cmd: str, arg: str = "") -> str:
     param = (arg or "").strip()
     self_files = [
         "Launch.bat",
-        "Manager.ps1",
+        "Launch.sh",
+        "manager.py",
         "assistant_server.py",
         "ui_studio.html",
         "workspace_config.json",
@@ -8867,7 +9549,7 @@ def execute_self_inspection_tool(cmd: str, arg: str = "") -> str:
     if action == "tree":
         tstats = get_temp_cache_stats()
         lines = [
-            "=== AETHERVAULT v4.0 SELF-ARCHITECTURE & FILE MANIFEST ===",
+            f"=== AETHERVAULT v{APP_VERSION} SELF-ARCHITECTURE & FILE MANIFEST ===",
             f"- Root Directory: {BASE_DIR}",
             f"- Ephemeral %TEMP% Session Cache: {tstats['session_temp_dir']} ({tstats['cached_files']} cached files, {tstats['size_kb']} KB — auto-deletes on shutdown)"
         ]
@@ -8906,7 +9588,7 @@ def execute_self_inspection_tool(cmd: str, arg: str = "") -> str:
     else:  # search across own files
         q = param.lower() or "def "
         hits = []
-        for fname in ("assistant_server.py", "Manager.ps1", "ui_studio.html", "pseudo_memory_index.json"):
+        for fname in ("assistant_server.py", "manager.py", "ui_studio.html", "pseudo_memory_index.json"):
             fpath = BASE_DIR / fname
             if not fpath.exists():
                 continue
@@ -9190,7 +9872,7 @@ SELF_MANUAL_SECTIONS = [
     {
         "id": "overview",
         "title": "1. System Map, Architecture & Folder Layout (LLM-Friendly Cheat Sheet)",
-        "body": "AetherVault Studio v4.20 is a 100% portable, zero-footprint local AI & PC Workbench workstation.\nCORE FILES:\n- Launch.bat / Launch.sh: Cross-platform launchers (Windows, macOS, Linux).\n- manager.py / Manager.ps1: Desktop Control Center (GUI + CLI) with live console & slash-commands.\n- assistant_server.py: FastAPI + llama.cpp + Smart API Waterfall + Live Python Workbench backend.\n- ui_studio.html: Single-file web UI (Desktop http://127.0.0.1:8000 | Home LAN http://<LAN_IP>:8000).\n- avs/platform_bridge.py, avs/toolbox.py, avs/workbench.py: Modular OS bridge, tool registry & killable subprocess sandbox.\nUSER DATA FOLDERS (ALL INCLUDED IN .ZIP EXPORT/IMPORT):\n- workspace_config.json: Persona, AI/User name, theme, toggles, failsafe_model, Spotify/Telegram settings.\n- user_profile_card.json: Saved user location, ZIP, map pin (lat/lon), pinned facts & custom fields.\n- memory_core.db & memory_vault/: SQLite Memory Vault (Priority #1) + chat sessions + indexed Lore chunks.\n- pseudo_memory_index.json & glossary_index.json: Auto-updated boot index & keyword map across chats/lore.\n- priority_pdfs/: Drop PDF/TXT/MD files here (toggle each file between CORE=always loaded or LORE=on-demand RAG).\n- chat_logs/: Auto-exported .txt transcripts of all chat sessions for cross-chat recall.\n- models/: Local .gguf brains (Default: gemma-4-E4B-it-Q4_K_M.gguf). stock_vault/: Golden backups & offline wheels.\n- .temp_cache/: Auto-purged session scratchpad."
+        "body": "AetherVault Studio v6.8 Bluesky is a 100% portable, zero-footprint local AI & PC Workbench workstation.\nBOOTSTRAPPER (FROZEN ENTRY LAYER):\n- Launch.bat / Launch.sh: Cross-platform bootstrappers (Windows, macOS, Linux).\n- manager.py: Permanent Bootstrapper & Control Center (GUI + CLI) with .venv auto-setup, OTA updates & live console.\nCORE RUNTIME & MODULAR avs/ PACKAGE:\n- assistant_server.py: FastAPI + llama.cpp + Smart API Waterfall + Live Python Workbench + Telegram/Bluesky/MCP backend.\n- ui_studio.html: Single-file web UI (Desktop http://127.0.0.1:8000 | Home LAN http://<LAN_IP>:8000).\n- avs/: Modular package (platform_bridge, toolbox, workbench, hardware_monitor, contracts, memory_graph, referee, tool_registry, bridges, turn_pipeline, model_polish).\nUSER DATA FOLDERS (ALL INCLUDED IN .ZIP EXPORT/IMPORT):\n- workspace_config.json: Persona, AI/User name, theme, toggles, failsafe_model, Spotify/Telegram settings.\n- user_profile_card.json: Saved user location, ZIP, map pin (lat/lon), pinned facts & custom fields.\n- memory_core.db & memory_vault/: SQLite Memory Vault (Priority #1) + chat sessions + indexed Lore chunks.\n- pseudo_memory_index.json & glossary_index.json: Auto-updated boot index & keyword map across chats/lore.\n- priority_pdfs/: Drop PDF/TXT/MD files here (toggle each file between CORE=always loaded or LORE=on-demand RAG).\n- chat_logs/: Auto-exported .txt transcripts of all chat sessions for cross-chat recall.\n- models/: Local .gguf brains (Default: gemma-4-E4B-it-Q4_K_M.gguf). stock_vault/: Golden backups & offline wheels.\n- .temp_cache/: Auto-purged session scratchpad."
     },
     {
         "id": "manager_commands",
@@ -9584,7 +10266,7 @@ def api_edit_user_message(payload: dict):
 # =====================================================================
 SELF_HEAL_DIR = BASE_DIR / "self_heal_staging"
 SELF_HEAL_DIR.mkdir(parents=True, exist_ok=True)
-PROTECTED_CORE_FILES = {"Launch.bat", "Launch.sh", "Windows_Defender_Patch.bat", "Manager.ps1", "assistant_server.py", "ui_studio.html", "workspace_config.json", "aethervault_logo.svg"}
+PROTECTED_CORE_FILES = {"Launch.bat", "Launch.sh", "manager.py", "assistant_server.py", "ui_studio.html", "workspace_config.json", "aethervault_logo.svg"}
 
 def list_pending_self_patches() -> list:
     out = []
@@ -9770,7 +10452,7 @@ def api_run_hardware_benchmark():
 
     if cores <= 2:
         tier = "Tier 1: Legacy / Dual-Core Laptop (Bare Minimum Spec)"
-        rec_engine = "Manager.ps1 -> Option [2] -> [B] (2015 Laptop Safe CPU Build)"
+        rec_engine = "Bootstrapper (manager.py) -> Switch Engine -> Safe CPU Build"
         rec_gov = "Laptop 2015 (Fast) — Forces Gear 1 Reflex (~500 chars)"
         rec_models = "1.5B Q4_K_M (~1.1 GB): Qwen2.5-1.5B, Qwen2.5-Coder-1.5B, or DeepSeek-R1-1.5B"
         est_speed = "~5 - 7 tokens/sec in Gear 1 (or 0% load via LAN Wireless Terminal Mode)"
@@ -9805,7 +10487,7 @@ def api_run_hardware_benchmark():
 
 @app.post("/self_heal/verify_all")
 def api_verify_all_core_files():
-    """Verifies syntax integrity of assistant_server.py, workspace_config.json, ui_studio.html, and Manager.ps1."""
+    """Verifies syntax integrity of assistant_server.py, ui_studio.html, manager.py, avs/*.py, and workspace_config.json."""
     results = []
     # 1. assistant_server.py
     try:
@@ -9821,12 +10503,31 @@ def api_verify_all_core_files():
         ok_html = ("<!DOCTYPE html>" in txt and "</html>" in txt and "<script>" in txt and "</script>" in txt)
         results.append({"file": "ui_studio.html", "ok": ok_html, "detail": f"HTML5 & JS structure verified ({ui_p.stat().st_size:,} bytes)"})
 
-    # 3. Manager.ps1 (7-bit ASCII check)
-    mgr_p = BASE_DIR / "Manager.ps1"
+    # 3. manager.py (Permanent Bootstrapper py_compile check)
+    mgr_p = BASE_DIR / "manager.py"
     if mgr_p.exists():
-        raw_b = mgr_p.read_bytes()
-        non_ascii = sum(1 for b in raw_b if b > 127)
-        results.append({"file": "Manager.ps1", "ok": non_ascii == 0, "detail": f"Pure 7-Bit ASCII verified ({len(raw_b):,} bytes, {non_ascii} non-ASCII bytes)"})
+        try:
+            py_compile.compile(str(mgr_p), doraise=True)
+            results.append({"file": "manager.py", "ok": True, "detail": f"Bootstrapper passed py_compile ({mgr_p.stat().st_size:,} bytes)"})
+        except Exception as e:
+            results.append({"file": "manager.py", "ok": False, "detail": str(e)})
+
+    # 3b. Modular avs/*.py package check
+    avs_dir = BASE_DIR / "avs"
+    if avs_dir.exists():
+        avs_errs = []
+        avs_cnt = 0
+        for p_mod in sorted(avs_dir.glob("*.py")):
+            avs_cnt += 1
+            try:
+                py_compile.compile(str(p_mod), doraise=True)
+            except Exception as e:
+                avs_errs.append(f"{p_mod.name}: {e}")
+        results.append({
+            "file": f"avs/*.py ({avs_cnt} modules)",
+            "ok": not avs_errs,
+            "detail": f"All {avs_cnt} avs/ modules passed py_compile" if not avs_errs else "; ".join(avs_errs[:3])
+        })
 
     # 4. workspace_config.json
     cfg_p = BASE_DIR / "workspace_config.json"

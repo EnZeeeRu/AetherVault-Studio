@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AetherVault Studio v4.20 - Unified Cross-Platform Desktop GUI & CLI Manager (manager.py)
+AetherVault Studio — Permanent Cross-Platform Bootstrapper & Control Center (manager.py)
 100% Python Standard Library (tkinter GUI + automatic CLI fallback on headless/SSH).
 """
 import os
@@ -20,7 +20,35 @@ import webbrowser
 import urllib.request
 from pathlib import Path
 
-APP_VERSION = "5.4"
+BOOTSTRAPPER_TAG = "Bootstrapper"
+DEFAULT_GITHUB_REPO = "EnZeeeRu/AetherVault-Studio"
+FROZEN_BOOTSTRAP_FILES = {"Launch.bat", "Launch.sh", "manager.py"}
+
+
+def detect_runtime_version() -> str:
+    """Dynamically reads the installed runtime version from manifest.json or assistant_server.py."""
+    m_p = Path(__file__).parent.resolve() / "manifest.json"
+    if m_p.exists():
+        try:
+            ver = str(json.loads(m_p.read_text(encoding="utf-8")).get("version") or "").strip()
+            if ver:
+                return ver
+        except Exception:
+            pass
+    srv_p = Path(__file__).parent.resolve() / "assistant_server.py"
+    if srv_p.exists():
+        try:
+            head = srv_p.read_text(encoding="utf-8", errors="ignore")[:8000]
+            import re as _re
+            m = _re.search(r'^APP_VERSION\s*=\s*["\']([^"\']+)["\']', head, flags=_re.MULTILINE)
+            if m:
+                return m.group(1).strip()
+        except Exception:
+            pass
+    return "unhydrated"
+
+
+APP_VERSION = detect_runtime_version()
 SERVER_PORT = int(os.environ.get("AVS_PORT", "8000"))
 ROOT_DIR = Path(__file__).parent.resolve()
 VENV_DIR = ROOT_DIR / ".venv"
@@ -410,10 +438,23 @@ def get_configured_github_repo() -> str:
     if cfg_p.exists():
         try:
             data = json.loads(cfg_p.read_text(encoding="utf-8"))
-            return str(data.get("github_repo") or "").strip().strip("/")
+            val = str(data.get("github_repo") or "").strip().strip("/")
+            if val:
+                return val
         except Exception:
             pass
-    return os.environ.get("AVS_GITHUB_REPO", "").strip().strip("/")
+    env_val = os.environ.get("AVS_GITHUB_REPO", "").strip().strip("/")
+    if env_val:
+        return env_val
+    m_p = ROOT_DIR / "manifest.json"
+    if m_p.exists():
+        try:
+            mv = str(json.loads(m_p.read_text(encoding="utf-8")).get("repo") or "").strip().strip("/")
+            if mv:
+                return mv
+        except Exception:
+            pass
+    return DEFAULT_GITHUB_REPO
 
 
 def set_configured_github_repo(repo_slug: str, log_fn=print):
@@ -430,12 +471,14 @@ def set_configured_github_repo(repo_slug: str, log_fn=print):
     log_fn(f"[GITHUB] Linked repository -> '{slug or '(none)'}'")
 
 
-def sync_from_github_ota(repo_slug: str = "", log_fn=print) -> bool:
+def sync_from_github_ota(repo_slug: str = "", log_fn=print, include_bootstrap: bool = False) -> bool:
     """
-    v5.0 Evergreen OTA Updater & 3-File Auto-Hydrator:
-    Fetches manifest.json from GitHub raw URL, verifies SHA-256 checksums,
-    snapshots core files to stock_vault first, and updates core files WITHOUT touching user data!
+    Bootstrapper OTA Updater & Auto-Hydrator:
+    Fetches manifest.json from GitHub, verifies SHA-256 checksums, snapshots runtime files
+    to stock_vault, and updates runtime files WITHOUT overwriting frozen bootstrapper files
+    (unless missing) or touching user data!
     """
+    global APP_VERSION
     slug = (repo_slug or get_configured_github_repo()).strip().strip("/")
     if not slug or "/" not in slug:
         log_fn("[OTA] No GitHub repo configured. Run: /repo <username>/AetherVault-Studio")
@@ -444,9 +487,10 @@ def sync_from_github_ota(repo_slug: str = "", log_fn=print) -> bool:
     manifest_url = f"{base_raw}/manifest.json"
     log_fn(f"[OTA] Checking {manifest_url} ...")
     try:
-        req = urllib.request.Request(manifest_url, headers={"User-Agent": f"AetherVaultStudio/{APP_VERSION}"})
+        req = urllib.request.Request(manifest_url, headers={"User-Agent": f"AetherVaultStudio-Bootstrapper/{APP_VERSION}"})
         with urllib.request.urlopen(req, timeout=15) as resp:
-            manifest = json.loads(resp.read().decode("utf-8"))
+            manifest_raw = resp.read()
+            manifest = json.loads(manifest_raw.decode("utf-8"))
     except Exception as e:
         log_fn(f"[OTA ERROR] Could not fetch manifest.json: {e}")
         return False
@@ -456,7 +500,11 @@ def sync_from_github_ota(repo_slug: str = "", log_fn=print) -> bool:
     for rel_path, expected_sha in files.items():
         if ".." in rel_path or rel_path.startswith("/"):
             continue
-        dest = ROOT_DIR / rel_path
+        dest = (ROOT_DIR / rel_path).resolve()
+        if ROOT_DIR.resolve() not in dest.parents and dest != ROOT_DIR.resolve():
+            continue
+        if rel_path in FROZEN_BOOTSTRAP_FILES and dest.exists() and not include_bootstrap:
+            continue
         if dest.exists():
             cur_sha = hashlib.sha256(dest.read_bytes()).hexdigest()
             if expected_sha and cur_sha == expected_sha:
@@ -466,7 +514,7 @@ def sync_from_github_ota(repo_slug: str = "", log_fn=print) -> bool:
                 shutil.copy2(dest, STOCK_VAULT / f"{dest.name}.good")
         file_url = f"{base_raw}/{rel_path}"
         try:
-            f_req = urllib.request.Request(file_url, headers={"User-Agent": f"AetherVaultStudio/{APP_VERSION}"})
+            f_req = urllib.request.Request(file_url, headers={"User-Agent": f"AetherVaultStudio-Bootstrapper/{APP_VERSION}"})
             with urllib.request.urlopen(f_req, timeout=25) as f_resp:
                 raw_bytes = f_resp.read()
             if expected_sha and hashlib.sha256(raw_bytes).hexdigest() != expected_sha:
@@ -478,8 +526,25 @@ def sync_from_github_ota(repo_slug: str = "", log_fn=print) -> bool:
             log_fn(f"[OTA] Updated {rel_path} ({len(raw_bytes):,} bytes)")
         except Exception as fe:
             log_fn(f"[OTA WARN] Failed to download {rel_path}: {fe}")
-    log_fn(f"[OTA OK] Sync complete from {slug} (v{manifest.get('version', '?')} | {updated} file(s) updated).")
+
+    try:
+        (ROOT_DIR / "manifest.json").write_bytes(manifest_raw)
+    except Exception:
+        pass
+    APP_VERSION = detect_runtime_version()
+    log_fn(f"[OTA OK] Sync complete from {slug} (Runtime v{manifest.get('version', '?')} | {updated} file(s) updated).")
     return True
+
+
+def ensure_runtime_hydrated(log_fn=print) -> bool:
+    """If launched as a bare bootstrapper without runtime files, automatically pulls them via GitHub OTA."""
+    srv = ROOT_DIR / "assistant_server.py"
+    ui = ROOT_DIR / "ui_studio.html"
+    avs_dir = ROOT_DIR / "avs"
+    if srv.exists() and ui.exists() and avs_dir.exists() and any(avs_dir.glob("*.py")):
+        return True
+    log_fn("[BOOTSTRAPPER] Runtime files missing locally -> auto-hydrating from GitHub OTA...")
+    return sync_from_github_ota(log_fn=log_fn)
 
 
 def cleanup_temp():
@@ -513,7 +578,7 @@ def launch_desktop_gui(snap_info: str) -> bool:
     TEXT = "#e5e7eb"
     MUTED = "#9ca3af"
 
-    root.title(f"AetherVault Studio v{APP_VERSION} — Portable Control Center")
+    root.title(f"AetherVault Studio — Bootstrapper & Control Center (Runtime v{APP_VERSION})")
     root.geometry("920x640")
     root.minsize(820, 560)
     root.configure(bg=BG)
@@ -553,7 +618,7 @@ def launch_desktop_gui(snap_info: str) -> bool:
     # Header Banner
     hdr = tk.Frame(root, bg=SIDEBAR, padx=16, pady=12, highlightbackground="#2b2e3d", highlightthickness=1)
     hdr.pack(fill="x")
-    tk.Label(hdr, text=f"AETHERVAULT STUDIO v{APP_VERSION}", font=("Segoe UI", 15, "bold"), bg=SIDEBAR, fg="#ffffff").pack(anchor="w")
+    tk.Label(hdr, text=f"AETHERVAULT STUDIO — BOOTSTRAPPER  (Runtime v{APP_VERSION})", font=("Segoe UI", 14, "bold"), bg=SIDEBAR, fg="#ffffff").pack(anchor="w")
     tk.Label(hdr, text=f"Made with <3 in Argentina by Enzeru  |  {platform.system()} ({platform.machine()})  |  Python {platform.python_version()}",
              font=("Segoe UI", 9), bg=SIDEBAR, fg=MUTED).pack(anchor="w", pady=(2, 6))
 
@@ -594,6 +659,8 @@ def launch_desktop_gui(snap_info: str) -> bool:
             ui_log("[INFO] Server is already running!")
             return
         def _task():
+            if not ensure_runtime_hydrated(log_fn=ui_log):
+                return
             vpy = ensure_environment(log_fn=ui_log, force_install=False)
             srv = ROOT_DIR / "assistant_server.py"
             if not check_python_syntax(srv, log_fn=ui_log):
@@ -849,7 +916,7 @@ def launch_desktop_gui(snap_info: str) -> bool:
     tk.Button(cmd_bar, text="Run", command=run_console_command, bg=ACCENT, fg="#fff", relief="flat", padx=10, pady=3, font=("Segoe UI", 8, "bold"), cursor="hand2").pack(side="right")
 
     refresh_badges()
-    ui_log(f"AetherVault Studio v{APP_VERSION} Control Center Ready.")
+    ui_log(f"AetherVault Studio Bootstrapper Ready (Installed Runtime: v{APP_VERSION}).")
     ui_log(f"Root Folder: {ROOT_DIR}")
     ui_log("Click '1. Launch AetherVault Server' to auto-verify packages and open the Studio UI.")
 
@@ -873,7 +940,7 @@ def run_cli(snap_info: str) -> int:
         lan_ip = get_local_ip()
         os_tag = f"{platform.system()} ({platform.machine()})"
         print("=======================================================================")
-        print(f"   AETHERVAULT STUDIO v{APP_VERSION} - CROSS-PLATFORM MANAGER (CLI)")
+        print(f"   AETHERVAULT STUDIO — BOOTSTRAPPER (CLI)  |  Runtime v{detect_runtime_version()}")
         print(f"   Platform    : {os_tag} | Python {platform.python_version()}")
         print(f"   Root Folder : {ROOT_DIR}")
         print(f"   Golden Sync : {snap_info}")
@@ -887,7 +954,8 @@ def run_cli(snap_info: str) -> int:
         print(" [5] Stock Offline Vault (Cache .whl + Golden Scripts + Models)")
         print(" [6] Switch Engine Backend (Vulkan GPU vs. 2015 Laptop Safe CPU)")
         print(" [7] Restore Golden Backup (assistant_server.py + ui_studio.html + DB)")
-        print(" [8] Run Automated Smoke Suite (tests/smoke.py)")
+        print(" [8] Check for GitHub OTA Runtime Updates (/update)")
+        print(" [9] Run Automated Smoke Suite (tests/smoke.py)")
         print(" [0] Exit (Purges .temp_cache)")
         print("=======================================================================")
         try:
@@ -896,6 +964,8 @@ def run_cli(snap_info: str) -> int:
             break
 
         if sel == "1":
+            if not ensure_runtime_hydrated():
+                continue
             vpy = ensure_environment(force_install=False)
             srv = ROOT_DIR / "assistant_server.py"
             if check_python_syntax(srv):
@@ -943,6 +1013,8 @@ def run_cli(snap_info: str) -> int:
         elif sel == "7":
             restore_golden_backup()
         elif sel == "8":
+            sync_from_github_ota()
+        elif sel == "9":
             subprocess.call([sys.executable, str(ROOT_DIR / "tests" / "smoke.py")])
         elif sel == "0":
             cleanup_temp()
