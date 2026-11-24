@@ -386,9 +386,13 @@ def import_workspace_zip(zip_path: Path, log_fn=print):
     if not zip_path.exists():
         log_fn(f"[ERROR] File not found: {zip_path}")
         return
+    root_res = ROOT_DIR.resolve()
     with zipfile.ZipFile(zip_path, "r") as zf:
         for member in zf.namelist():
-            if ".." in member or member.startswith("/") or member.startswith("\\"):
+            if ".." in member or member.startswith("/") or member.startswith("\\") or ":" in member:
+                continue
+            target_out = (ROOT_DIR / member).resolve()
+            if root_res not in target_out.parents and target_out != root_res:
                 continue
             zf.extract(member, ROOT_DIR)
     log_fn(f"[OK] Imported workspace .ZIP from {zip_path.name}!")
@@ -484,10 +488,16 @@ def sync_from_github_ota(repo_slug: str = "", log_fn=print, include_bootstrap: b
         log_fn("[OTA] No GitHub repo configured. Run: /repo <username>/AetherVault-Studio")
         return False
     base_raw = f"https://raw.githubusercontent.com/{slug}/main"
-    manifest_url = f"{base_raw}/manifest.json"
-    log_fn(f"[OTA] Checking {manifest_url} ...")
+    bust = int(time.time())
+    ota_headers = {
+        "User-Agent": f"AetherVaultStudio-Bootstrapper/{APP_VERSION}",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
+    manifest_url = f"{base_raw}/manifest.json?t={bust}"
+    log_fn(f"[OTA] Checking {base_raw}/manifest.json ...")
     try:
-        req = urllib.request.Request(manifest_url, headers={"User-Agent": f"AetherVaultStudio-Bootstrapper/{APP_VERSION}"})
+        req = urllib.request.Request(manifest_url, headers=ota_headers)
         with urllib.request.urlopen(req, timeout=15) as resp:
             manifest_raw = resp.read()
             manifest = json.loads(manifest_raw.decode("utf-8"))
@@ -497,8 +507,9 @@ def sync_from_github_ota(repo_slug: str = "", log_fn=print, include_bootstrap: b
 
     files = manifest.get("files") or {}
     updated = 0
+    warn_count = 0
     for rel_path, expected_sha in files.items():
-        if ".." in rel_path or rel_path.startswith("/"):
+        if ".." in rel_path or rel_path.startswith("/") or ":" in rel_path:
             continue
         dest = (ROOT_DIR / rel_path).resolve()
         if ROOT_DIR.resolve() not in dest.parents and dest != ROOT_DIR.resolve():
@@ -512,12 +523,13 @@ def sync_from_github_ota(repo_slug: str = "", log_fn=print, include_bootstrap: b
             if dest.parent == ROOT_DIR and dest.name in ("assistant_server.py", "ui_studio.html"):
                 STOCK_VAULT.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(dest, STOCK_VAULT / f"{dest.name}.good")
-        file_url = f"{base_raw}/{rel_path}"
+        file_url = f"{base_raw}/{rel_path}?t={bust}"
         try:
-            f_req = urllib.request.Request(file_url, headers={"User-Agent": f"AetherVaultStudio-Bootstrapper/{APP_VERSION}"})
+            f_req = urllib.request.Request(file_url, headers=ota_headers)
             with urllib.request.urlopen(f_req, timeout=25) as f_resp:
                 raw_bytes = f_resp.read()
             if expected_sha and hashlib.sha256(raw_bytes).hexdigest() != expected_sha:
+                warn_count += 1
                 log_fn(f"[OTA WARN] SHA-256 mismatch for {rel_path} — skipped!")
                 continue
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -525,26 +537,52 @@ def sync_from_github_ota(repo_slug: str = "", log_fn=print, include_bootstrap: b
             updated += 1
             log_fn(f"[OTA] Updated {rel_path} ({len(raw_bytes):,} bytes)")
         except Exception as fe:
+            warn_count += 1
             log_fn(f"[OTA WARN] Failed to download {rel_path}: {fe}")
 
-    try:
-        (ROOT_DIR / "manifest.json").write_bytes(manifest_raw)
-    except Exception:
-        pass
+    if warn_count == 0:
+        try:
+            (ROOT_DIR / "manifest.json").write_bytes(manifest_raw)
+        except Exception:
+            pass
     APP_VERSION = detect_runtime_version()
-    log_fn(f"[OTA OK] Sync complete from {slug} (Runtime v{manifest.get('version', '?')} | {updated} file(s) updated).")
-    return True
+    if warn_count:
+        log_fn(f"[OTA PARTIAL] Synced {updated} file(s) with {warn_count} warning(s) from {slug} (Runtime v{manifest.get('version', '?')}).")
+    else:
+        log_fn(f"[OTA OK] Sync complete from {slug} (Runtime v{manifest.get('version', '?')} | {updated} file(s) updated).")
+    return warn_count == 0
+
+
+REQUIRED_RUNTIME_FILES = (
+    "assistant_server.py",
+    "ui_studio.html",
+    "avs/__init__.py",
+    "avs/platform_bridge.py",
+    "avs/toolbox.py",
+    "avs/workbench.py",
+    "avs/hardware_monitor.py",
+    "avs/contracts.py",
+    "avs/memory_graph.py",
+    "avs/referee.py",
+    "avs/tool_registry.py",
+    "avs/bridges.py",
+    "avs/turn_pipeline.py",
+    "avs/model_polish.py",
+)
 
 
 def ensure_runtime_hydrated(log_fn=print) -> bool:
-    """If launched as a bare bootstrapper without runtime files, automatically pulls them via GitHub OTA."""
-    srv = ROOT_DIR / "assistant_server.py"
-    ui = ROOT_DIR / "ui_studio.html"
-    avs_dir = ROOT_DIR / "avs"
-    if srv.exists() and ui.exists() and avs_dir.exists() and any(avs_dir.glob("*.py")):
+    """If launched as a bare bootstrapper or missing any required runtime/avs module, auto-hydrates via GitHub OTA."""
+    missing = [rel for rel in REQUIRED_RUNTIME_FILES if not (ROOT_DIR / rel).exists()]
+    if not missing:
         return True
-    log_fn("[BOOTSTRAPPER] Runtime files missing locally -> auto-hydrating from GitHub OTA...")
-    return sync_from_github_ota(log_fn=log_fn)
+    log_fn(f"[BOOTSTRAPPER] Missing {len(missing)} runtime file(s) ({', '.join(missing[:4])}) -> auto-hydrating from GitHub OTA...")
+    sync_from_github_ota(log_fn=log_fn)
+    still_missing = [rel for rel in REQUIRED_RUNTIME_FILES if not (ROOT_DIR / rel).exists()]
+    if still_missing:
+        log_fn(f"[BOOTSTRAPPER ERROR] Still missing required files after OTA: {', '.join(still_missing)}")
+        return False
+    return True
 
 
 def cleanup_temp():
@@ -602,6 +640,9 @@ def launch_desktop_gui(snap_info: str) -> bool:
         venv_lbl.configure(text=f".venv: {'READY' if vpy.exists() else 'NOT CREATED'}", fg=GREEN if vpy.exists() else YELLOW)
         models_lbl.configure(text=f"Models: {len(ggufs)} GGUF(s)")
         engine_lbl.configure(text=f"Engine: {eng}")
+        ver_now = detect_runtime_version()
+        root.title(f"AetherVault Studio — Bootstrapper & Control Center (Runtime v{ver_now})")
+        hdr_title_lbl.configure(text=f"AETHERVAULT STUDIO — BOOTSTRAPPER  (Runtime v{ver_now})")
         url_lbl.configure(text=f"Desktop: http://127.0.0.1:{SERVER_PORT}  |  LAN: http://{lan_ip}:{SERVER_PORT}")
 
     def run_bg(task_name: str, fn):
@@ -618,7 +659,8 @@ def launch_desktop_gui(snap_info: str) -> bool:
     # Header Banner
     hdr = tk.Frame(root, bg=SIDEBAR, padx=16, pady=12, highlightbackground="#2b2e3d", highlightthickness=1)
     hdr.pack(fill="x")
-    tk.Label(hdr, text=f"AETHERVAULT STUDIO — BOOTSTRAPPER  (Runtime v{APP_VERSION})", font=("Segoe UI", 14, "bold"), bg=SIDEBAR, fg="#ffffff").pack(anchor="w")
+    hdr_title_lbl = tk.Label(hdr, text=f"AETHERVAULT STUDIO — BOOTSTRAPPER  (Runtime v{APP_VERSION})", font=("Segoe UI", 14, "bold"), bg=SIDEBAR, fg="#ffffff")
+    hdr_title_lbl.pack(anchor="w")
     tk.Label(hdr, text=f"Made with <3 in Argentina by Enzeru  |  {platform.system()} ({platform.machine()})  |  Python {platform.python_version()}",
              font=("Segoe UI", 9), bg=SIDEBAR, fg=MUTED).pack(anchor="w", pady=(2, 6))
 

@@ -1,7 +1,7 @@
 {
   "version": "6.8",
   "repo": "EnZeeeRu/AetherVault-Studio",
-  "updated_at": "2026-11-23",
+  "updated_at": "2026-11-24",
   "bootstrap_files": [
     "Launch.bat",
     "Launch.sh",
@@ -10,11 +10,11 @@
   "files": {
     "Launch.bat": "875335adee3f1e1ff5949cc4d926013a7324681f6efc9e0e4190945dff0833a5",
     "Launch.sh": "e1fd0734f10ab4114e6d699056d465cb88cbea78e38a8f434eb6387398bc50c8",
-    "manager.py": "d27cfacae31dc35d8be6a5d0420917760dd4bbf54cb8f58169928d81dd8677f0",
-    "assistant_server.py": "7080436f135390c679528ca61c1c556bbaea7a4b0b4e782e9c34d3d8d4656062",
-    "ui_studio.html": "005b2b4162fcf9bf87696cc02f6fdc8e7a30b95ec0b428de677e4d0b8e793359",
+    "manager.py": "2b470e055ef511c5c1900805e2c26046838a27408339e75df92d0a3297b7b37d",
+    "assistant_server.py": "1a51fd1a2e0a67a93fbdb2d8a115241fc042c4a9e65bedfc4d9d7790921caf88",
+    "ui_studio.html": "21561b8c13a7968e8e8f5a9657bee83c0a58c2289a92880e2dc81cec71559a6b",
     "aethervault_logo.svg": "83252944100dff39d7b1e7a2347c1badbb839d5faf7d6d21c90d895210df322c",
-    "AetherVault_Studio_Manual.pdf": "0965cb6d3fbf7010f455c2e5cfd1bf345afd7a4662e9fd507837b0768605d7a9",
+    "AetherVault_Studio_Manual.pdf": "fe1bb489c03915ec951515a401901ba74616310b1abaf42255381e3f7775f595",
     "avs/__init__.py": "3ffda96f621ff8f5886a97e8962c45e9a122067412cecc15e4de7f3734c10cad",
     "avs/platform_bridge.py": "68b827e8b28d766988e92c0110f2c1916424f6c477378ed6fd058d71111995f7",
     "avs/toolbox.py": "ca40103578f9b692da910e8fe4f9aa9e6e63b5e15f9d1ee1c905e691c2b173d6",

@@ -3415,7 +3415,7 @@ function copyLanUrl() {
 async function verifyAllCoreFiles() {
   const out = document.getElementById('selfheal-cmd-output');
   out.style.display = 'block';
-  out.innerText = '🔍 Running syntax & ASCII verification across all 4 core files...';
+  out.innerText = '🔍 Running syntax & integrity verification across all core files...';
   const res = await fetch('/self_heal/verify_all', { method: 'POST' });
   const data = await res.json();
   const lines = [`=== 🔍 CORE FILE INTEGRITY REPORT (${data.ok ? 'ALL PASSED' : 'ISSUES FOUND'}) ===`];
@@ -4394,7 +4394,7 @@ async function saveIntegrationsConfig() {
       redirect_uri: "http://127.0.0.1:8000/spotify_callback"
     }
   };
-  await runWithActivityFeedback('save_integrations', 'OSWorld, Telegram & Spotify Settings', async () => {
+  await runWithActivityFeedback('save_integrations', 'OSWorld, Telegram, Bluesky & Spotify Settings', async () => {
     await fetch('/config/update', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
@@ -5157,12 +5157,18 @@ async function runWebTerminalCmd(presetCmd) {
 
 async function triggerWebOtaUpdate() {
   const box = document.getElementById('ota-status-box');
+  const termOut = document.getElementById('web-term-out');
   if (box) { box.style.display = 'block'; box.innerText = '⏳ Checking GitHub manifest.json & verifying SHA-256...'; }
   try {
     const res = await fetch('/api/ota/update', { method: 'POST' });
     const data = await res.json();
-    if (box) box.innerText = data.output || 'Update check complete.';
-    await runWebTerminalCmd('/update');
+    const outTxt = data.output || 'Update check complete.';
+    if (box) box.innerText = outTxt;
+    if (termOut) {
+      termOut.innerText += `\n> /update\n${outTxt}\n`;
+      termOut.scrollTop = termOut.scrollHeight;
+    }
+    refreshStatus();
   } catch (e) {
     if (box) box.innerText = '❌ OTA Update failed: ' + e;
   }

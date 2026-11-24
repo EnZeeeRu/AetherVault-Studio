@@ -3666,7 +3666,7 @@ def build_pc_reality_anchor() -> str:
 def build_operator_voice_card(ai_name: str, user_name: str) -> str:
     """Lean ~300-char personality header for Operator Mode (keeps attitude, strips heavy RP scenes & lore bloat)."""
     return (
-        f"You are {ai_name}, running live on {user_name}'s computer inside AetherVault Studio v4.0 in PC Operator Mode. "
+        f"You are {ai_name}, running live on {user_name}'s computer inside AetherVault Studio v{APP_VERSION} in PC Operator Mode. "
         f"Keep your natural, direct, laid-back voice without robotic filler or theatrical asterisk roleplay (*smirks*, *taps keyboard*). "
         f"Use your real tools whenever {user_name} asks to inspect the PC, check files, control Spotify, run Python, or search the web."
     )
@@ -5534,11 +5534,13 @@ def save_to_memory(category: str, fact: str, sync_pseudo: bool = True) -> str:
             card["zip_code"] = clean_zip
             save_user_profile_card(card)
     elif cat_low in ("user_note", "active_project", "preference"):
-        card = load_user_profile_card()
-        pf = card.get("pinned_facts") or []
-        if fact not in pf:
-            card["pinned_facts"] = (pf + [fact])[-10:]
-            save_user_profile_card(card)
+        is_ai_instruction = bool(re.match(r"^(?:you\s+(?:can|could|should|have|need|must|are\s+supposed|ought)|please\s+)", fact.lower()))
+        if not is_ai_instruction:
+            card = load_user_profile_card()
+            pf = card.get("pinned_facts") or []
+            if fact not in pf:
+                card["pinned_facts"] = (pf + [fact])[-10:]
+                save_user_profile_card(card)
 
     with get_db() as conn:
         c = conn.cursor()
@@ -6028,15 +6030,18 @@ def post_to_bluesky(text: str, reply_uri: str = "", reply_cid: str = "") -> dict
 
 def bluesky_polling_worker():
     """Background Bluesky mention watcher (optional, only active when bluesky.enabled & poll_mentions are True)."""
+    seeded_initial = False
     while True:
         try:
             bcfg = WORKSPACE_CFG.get("bluesky") or {}
             enabled = bool(bcfg.get("enabled")) and bool(bcfg.get("poll_mentions", True)) and not STATE.get("offline_mode")
             if not enabled or not (bcfg.get("handle") or "").strip() or not (bcfg.get("app_password") or "").strip():
                 BSKY_STATE["status"] = "Disabled"
+                seeded_initial = False
                 time.sleep(6)
                 continue
             sess = _bsky_ensure_session()
+            my_did = (sess.get("did") or "").strip().lower()
             BSKY_STATE["status"] = f"Connected (@{sess.get('handle')})"
             r = requests.get(
                 f"{sess['pds']}/xrpc/app.bsky.notification.listNotifications",
@@ -6046,17 +6051,25 @@ def bluesky_polling_worker():
             )
             if r.status_code == 200:
                 notifs = (r.json() or {}).get("notifications") or []
+                if not seeded_initial:
+                    for n in notifs:
+                        u0 = n.get("uri") or ""
+                        if u0:
+                            _BSKY_SEEN_URIS.add(u0)
+                    seeded_initial = True
+                    time.sleep(25)
+                    continue
                 allowed_raw = (bcfg.get("allowed_dids") or "").strip()
                 allowed_set = {x.strip().lower() for x in re.split(r"[,;\s]+", allowed_raw) if x.strip()}
                 for n in reversed(notifs):
-                    if (n.get("reason") or "") != "mention":
+                    if (n.get("reason") or "") != "mention" or n.get("isRead"):
                         continue
                     uri = n.get("uri") or ""
                     cid = n.get("cid") or ""
                     author = n.get("author") or {}
                     did = (author.get("did") or "").strip().lower()
                     handle_a = (author.get("handle") or "").strip().lower()
-                    if not uri or uri in _BSKY_SEEN_URIS:
+                    if not uri or uri in _BSKY_SEEN_URIS or (my_did and did == my_did):
                         continue
                     _BSKY_SEEN_URIS.add(uri)
                     if allowed_set and did not in allowed_set and handle_a not in allowed_set:
@@ -7447,50 +7460,63 @@ def api_terminal_exec(payload: dict):
 
 @app.post("/api/ota/update")
 def api_ota_update():
-    """Pulls latest core files from EnZeeeRu/AetherVault-Studio (SHA-256 verified) directly from the UI or phone."""
-    slug = "EnZeeeRu/AetherVault-Studio"
+    """Pulls latest core files from GitHub (SHA-256 verified, cache-busted) directly from the UI or phone."""
+    slug = (WORKSPACE_CFG.get("github_repo") or "EnZeeeRu/AetherVault-Studio").strip().strip("/")
     base_raw = f"https://raw.githubusercontent.com/{slug}/main"
+    bust = int(time.time())
+    ota_headers = {"User-Agent": f"AetherVaultStudio/{APP_VERSION}", "Cache-Control": "no-cache", "Pragma": "no-cache"}
     try:
-        r = requests.get(f"{base_raw}/manifest.json", headers={"User-Agent": f"AetherVaultStudio/{APP_VERSION}"}, timeout=15)
+        r = requests.get(f"{base_raw}/manifest.json?t={bust}", headers=ota_headers, timeout=15)
         r.raise_for_status()
+        manifest_raw = r.content
         manifest = r.json()
     except Exception as e:
         return {"ok": False, "output": f"[OTA ERROR] Could not fetch manifest.json: {e}"}
 
     files = manifest.get("files") or {}
     updated = []
+    warnings_list = []
     stock_dir = BASE_DIR / "stock_vault"
     stock_dir.mkdir(parents=True, exist_ok=True)
     frozen_bootstrappers = {"Launch.bat", "Launch.sh", "manager.py"}
     for rel_path, expected_sha in files.items():
-        if ".." in rel_path or rel_path.startswith("/"):
+        if ".." in rel_path or rel_path.startswith("/") or ":" in rel_path:
             continue
         dest = (BASE_DIR / rel_path).resolve()
-        if rel_path in frozen_bootstrappers and dest.exists():
-            continue
         if BASE_DIR.resolve() not in dest.parents and dest != BASE_DIR.resolve():
+            continue
+        if rel_path in frozen_bootstrappers and dest.exists():
             continue
         if dest.exists() and expected_sha and hashlib.sha256(dest.read_bytes()).hexdigest() == expected_sha:
             continue
         try:
-            fr = requests.get(f"{base_raw}/{rel_path}", headers={"User-Agent": f"AetherVaultStudio/{APP_VERSION}"}, timeout=25)
+            fr = requests.get(f"{base_raw}/{rel_path}?t={bust}", headers=ota_headers, timeout=25)
             fr.raise_for_status()
             raw_b = fr.read()
             if expected_sha and hashlib.sha256(raw_b).hexdigest() != expected_sha:
+                warnings_list.append(f"SHA-256 mismatch for {rel_path} — skipped")
                 continue
             if dest.exists() and dest.parent == BASE_DIR.resolve() and dest.name in ("assistant_server.py", "ui_studio.html"):
                 shutil.copy2(dest, stock_dir / f"{dest.name}.good")
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(raw_b)
             updated.append(rel_path)
+        except Exception as fe:
+            warnings_list.append(f"Failed {rel_path}: {fe}")
+
+    if not warnings_list:
+        try:
+            (BASE_DIR / "manifest.json").write_bytes(manifest_raw)
         except Exception:
             pass
     ver_new = manifest.get("version", "?")
+    warn_suffix = (" | Warnings: " + "; ".join(warnings_list)) if warnings_list else ""
+    tag = "[OTA PARTIAL]" if warnings_list else "[OTA OK]"
     if updated:
-        msg = f"[OTA OK] Updated {len(updated)} file(s) to v{ver_new}: {', '.join(updated)}. Reload page (or restart server if .py changed)!"
+        msg = f"{tag} Updated {len(updated)} file(s) to v{ver_new}: {', '.join(updated)}. Reload page (or restart server if .py changed)!{warn_suffix}"
     else:
-        msg = f"[OTA OK] Already up to date with {slug} (v{ver_new})."
-    return {"ok": True, "version": ver_new, "updated": updated, "output": msg}
+        msg = f"{tag} Already up to date with {slug} (v{ver_new}).{warn_suffix}"
+    return {"ok": len(warnings_list) == 0, "version": ver_new, "updated": updated, "warnings": warnings_list, "output": msg}
 
 @app.post("/api/system/restart")
 def api_system_restart():
@@ -7555,7 +7581,10 @@ def openai_v1_models():
 def openai_v1_chat_completions(payload: dict):
     """OpenAI-compatible /v1/chat/completions endpoint routing through AetherVault's Zero-Drop Brain."""
     msgs = payload.get("messages") or [{"role": "user", "content": "Hello"}]
-    max_t = int(payload.get("max_tokens") or 1024)
+    try:
+        max_t = max(16, min(32768, int(payload.get("max_tokens") or 1024)))
+    except Exception:
+        max_t = 1024
     temp = float(payload.get("temperature") or 0.7)
     top_p = float(payload.get("top_p") or 0.95)
     reply_text = dispatch_brain_sync(messages=msgs, max_tokens=max_t, temperature=temp, top_p=top_p)
@@ -7829,9 +7858,13 @@ async def import_workspace_zip(file: UploadFile = File(...)):
     content = await file.read()
     temp_zip.write_bytes(content)
     try:
+        base_res = BASE_DIR.resolve()
         with zipfile.ZipFile(temp_zip, "r") as zf:
             for member in zf.namelist():
-                if ".." in member or member.startswith("/") or member.startswith("\\"):
+                if ".." in member or member.startswith("/") or member.startswith("\\") or ":" in member:
+                    continue
+                target_out = (BASE_DIR / member).resolve()
+                if base_res not in target_out.parents and target_out != base_res:
                     continue
                 zf.extract(member, BASE_DIR)
         init_db()
@@ -8022,7 +8055,10 @@ def api_unload_model():
 
 @app.post("/set_idle_sleep")
 def api_set_idle_sleep(payload: dict):
-    mins = max(0, min(240, int(payload.get("minutes", 10))))
+    try:
+        mins = max(0, min(240, int(payload.get("minutes", 10))))
+    except Exception:
+        mins = 10
     WORKSPACE_CFG["idle_unload_minutes"] = mins
     save_workspace_config(WORKSPACE_CFG)
     STATE["last_activity_ts"] = time.time()
@@ -8402,9 +8438,8 @@ def chat_stream(payload: dict):
                     bracket_hold = ""
 
                 if not escalated_to_deep:
-                    STATE["generating"] = False
-                    set_step("Idle")
-                    clean_reflex = re.sub(r"<think>[\s\S]*?</think>", "", reflex_reply).strip()
+                    clean_reflex = re.sub(r"<\|think\|>[\s\S]*?<\|/think\|>", "", reflex_reply, flags=re.IGNORECASE)
+                    clean_reflex = re.sub(r"<think>[\s\S]*?</think>", "", clean_reflex, flags=re.IGNORECASE).strip()
                     clean_reflex = re.sub(rf"^({re.escape(ai_name)}|Assistant):\s*", "", clean_reflex, flags=re.IGNORECASE).strip()
                     fast_search_m = re.search(r"\[\[SEARCH:([^\]]+)\]\]", clean_reflex)
                     if fast_search_m and fast_search_m.group(1).strip().lower() not in ("clean keywords", "query", "keywords") and not STATE["offline_mode"] and not STATE["stop_requested"]:
@@ -9130,13 +9165,14 @@ def chat_stream(payload: dict):
             tb = traceback.format_exc()
             STATE["last_debug"]["error"] = tb
             err_card = format_predetermined_error("ERR_ENGINE_CRASH", str(e))
-            STATE["generating"] = False
-            set_step("Idle")
             yield json.dumps({"type": "issue", "issue": err_card}) + "\n"
             yield json.dumps({
                 "type": "done",
                 "reply": f"⚠️ **[{err_card['code']}: {err_card['title']}]**\n{err_card['message']}\n💡 *Fix: {err_card['fix']}*\n`{type(e).__name__}: {e}`"
             }) + "\n"
+        finally:
+            STATE["generating"] = False
+            set_step("Idle")
 
     return StreamingResponse(event_generator(), media_type="application/x-ndjson")
 
@@ -9194,7 +9230,7 @@ def format_predetermined_error(err_key: str, extra_detail: str = "") -> dict:
 
 UNIVERSAL_CAPABILITY_LOCK = (
     "[BUILT-IN CAPABILITIES & TOOL TAGS (ALWAYS AVAILABLE REGARDLESS OF MODEL OR PERSONA)]:\n"
-    "- You run locally inside AetherVault Studio v4.0 with session-scoped %TEMP% dynamic caching, full Cross-Chat Recall, Self-Code/Log Inspection, a Knowledge Tree (/priority_pdfs), Local PC/Drive file access, Live Web Search, Spotify control, Specialist Image & Music Managers (Cashier-to-Manager swap), and OSWorld Desktop GUI control.\n"
+    f"- You run locally inside AetherVault Studio v{APP_VERSION} with session-scoped %TEMP% dynamic caching, full Cross-Chat Recall, Self-Code/Log Inspection, a Knowledge Tree (/priority_pdfs), Local PC/Drive file access, Live Web Search, Spotify control, Specialist Image & Music Managers (Cashier-to-Manager swap), and OSWorld Desktop GUI control.\n"
     "- Live Python Workbench: To actually play music, check real weather, search the web, or inspect the PC while staying in character, output a ```workbench block (`vault.spotify('play', 'song')`, `vault.spotify('next')`, `vault.weather('City')`, `vault.web('query')`, `vault.pc_info()`).\n"
     "- Optional Tool Tags you can emit anytime: [[CHATS:list|]] | [[CHATS:search|topic]] | [[CHATS:read|session]] | "
     "[[SELF:tree|]] | [[SELF:errors|]] | [[SELF:search|term]] | [[SELF:read|file:1-60]] | "
@@ -9249,10 +9285,13 @@ def harvest_passive_user_notes(user_msg: str) -> list:
                     card["zip_code"] = captured
                     card_changed = True
                 elif cat in ("user_note", "active_project", "preference"):
-                    pf = card.get("pinned_facts") or []
-                    if fact_str not in pf:
-                        card["pinned_facts"] = (pf + [fact_str])[-10:]
-                        card_changed = True
+                    low_f = fact_str.lower()
+                    is_ai_instruction = bool(re.match(r"^(?:you\s+(?:can|could|should|have|need|must|are\s+supposed|ought)|please\s+)", low_f))
+                    if not is_ai_instruction:
+                        pf = card.get("pinned_facts") or []
+                        if fact_str not in pf:
+                            card["pinned_facts"] = (pf + [fact_str])[-10:]
+                            card_changed = True
     if harvested:
         sync_pseudo_memory_and_index()
     if card_changed:
@@ -9790,7 +9829,10 @@ def serve_generated_audio(filename: str):
 @app.post("/generate_music")
 def api_generate_music(payload: dict):
     prompt = (payload.get("prompt") or "").strip()
-    duration = int(payload.get("duration") or 8)
+    try:
+        duration = max(3, min(30, int(payload.get("duration") or 8)))
+    except Exception:
+        duration = 8
     if not prompt:
         return {"ok": False, "error": "Empty music prompt"}
     set_step(f"🏪 Music Manager composing: {prompt[:35]}...")
@@ -9927,7 +9969,7 @@ def search_self_manual(query: str = "") -> str:
         hits = sum(1 for w in q.split() if len(w) >= 3 and w in txt.lower())
         scored.append((hits, txt))
     scored.sort(key=lambda x: x[0], reverse=True)
-    return "=== AETHERVAULT v4.0 BUILT-IN MANUAL REFERENCE ===\n" + "\n\n".join([t for _, t in scored[:3]])
+    return f"=== AETHERVAULT v{APP_VERSION} BUILT-IN MANUAL REFERENCE ===\n" + "\n\n".join([t for _, t in scored[:3]])
 
 @app.get("/manual/content")
 def api_get_manual_content():
