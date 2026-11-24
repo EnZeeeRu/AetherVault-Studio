@@ -10,15 +10,17 @@
   "files": {
     "Launch.bat": "875335adee3f1e1ff5949cc4d926013a7324681f6efc9e0e4190945dff0833a5",
     "Launch.sh": "e1fd0734f10ab4114e6d699056d465cb88cbea78e38a8f434eb6387398bc50c8",
-    "manager.py": "2b470e055ef511c5c1900805e2c26046838a27408339e75df92d0a3297b7b37d",
-    "assistant_server.py": "1a51fd1a2e0a67a93fbdb2d8a115241fc042c4a9e65bedfc4d9d7790921caf88",
-    "ui_studio.html": "21561b8c13a7968e8e8f5a9657bee83c0a58c2289a92880e2dc81cec71559a6b",
+    "manager.py": "3e417d30f32c29b2e5599f4a3195a06979cd42548bc4fdd5a1db60bb59f9a91c",
+    "assistant_server.py": "842626bb3e2694553993b00a8e49ba4e225f0b73a9ecabe44ea6e051c023ac81",
+    "ui_studio.html": "01fbe09c333e7ce76f7e4a42e297bf5c3e9d98ccdacf7e925f0c634e4b3c680a",
     "aethervault_logo.svg": "83252944100dff39d7b1e7a2347c1badbb839d5faf7d6d21c90d895210df322c",
-    "AetherVault_Studio_Manual.pdf": "fe1bb489c03915ec951515a401901ba74616310b1abaf42255381e3f7775f595",
+    "AetherVault_Studio_Manual.pdf": "563643f74ee2e927525717dbd4126ca1696c2daa60129bbf8075c176662ccd6c",
+    "locales/en.json": "e4411a6c0e0d55b49902efeb5dacd9b908240689b5a3cd2edb8e4b102f0616c0",
+    "locales/es.json": "cf16541bd57ae2e38af52865f0a292f28804391f36b998eb235969b4973b4f66",
     "avs/__init__.py": "3ffda96f621ff8f5886a97e8962c45e9a122067412cecc15e4de7f3734c10cad",
-    "avs/platform_bridge.py": "68b827e8b28d766988e92c0110f2c1916424f6c477378ed6fd058d71111995f7",
-    "avs/toolbox.py": "ca40103578f9b692da910e8fe4f9aa9e6e63b5e15f9d1ee1c905e691c2b173d6",
-    "avs/workbench.py": "944acdbfbbf08e9091eae2e93cc402a2128aa42ac951497ed5046b881cfd9f85",
+    "avs/platform_bridge.py": "4eace1bcd9e5ab8ff18becac09f57672508ef49f5257d0f50e45a9c211af41f4",
+    "avs/toolbox.py": "402d308d5bb669dd94112afd97c5751df2349f8db5324b5fae0f03460806b48f",
+    "avs/workbench.py": "c960ccb01490ed3eac6804def128fb3c99df8968ff02c65a8bd9560da61831e6",
     "avs/hardware_monitor.py": "adb205b6a3467a72763f4a36e822d692dcd7d28e881d8292d017ee256babbcab",
     "avs/contracts.py": "0cadcf2a31f06734d9feb638a323541c5ee4597a46420123f9ee7ef37de467f7",
     "avs/memory_graph.py": "61ef93b1d7199395ae23c803819137a5382a145afd8e733bc9006e593e3417cc",
@@ -27,7 +29,9 @@
     "avs/bridges.py": "41509220961a4d80e0e51c78ee166d09a44643edc4df8fb4fb41a4c7f5ceaede",
     "avs/turn_pipeline.py": "d2d7624ad98b5fb3aaf50b1939422be4807de5e6f9b3674146fa1e9fc0ad7e39",
     "avs/model_polish.py": "b42d41f81680d84fdfff2a3d6de81e327228d45ce9574e0a0d5e3e42ba0f7bf4",
-    "custom_tools/README.md": "b87549c6fea62448b0e8f28e3e13dfcd11be3c7e093f2cbe1a6ff3e0a3eb775d",
-    "tests/smoke.py": "ed38f168cd5f37f9de8ae0faaff381f542bf34bc9a428bdd5cf4dc6c01f2eb63"
+    "avs/language_tools.py": "bae76acedb95af2cbc1be77783f2b83fe46a8a58814e8c69442c0bc21421e484",
+    "avs/manual_assets.py": "07eddf34f64d1fa687412a4cb72a9245778cadb8d3583da8440f638a5f47e89f",
+    "custom_tools/README.md": "b42bb5d429635ffd212ee2097f2ba1ae566d3db19b9749a6a751b44893f11291",
+    "tests/smoke.py": "9a2ed18f5b03b318586cb8a11483b0daa0bb5e19801b19115964fec1ebe148c3"
   }
 }

@@ -556,6 +556,10 @@ def sync_from_github_ota(repo_slug: str = "", log_fn=print, include_bootstrap: b
 REQUIRED_RUNTIME_FILES = (
     "assistant_server.py",
     "ui_studio.html",
+    "aethervault_logo.svg",
+    "AetherVault_Studio_Manual.pdf",
+    "locales/en.json",
+    "locales/es.json",
     "avs/__init__.py",
     "avs/platform_bridge.py",
     "avs/toolbox.py",
@@ -568,6 +572,8 @@ REQUIRED_RUNTIME_FILES = (
     "avs/bridges.py",
     "avs/turn_pipeline.py",
     "avs/model_polish.py",
+    "avs/language_tools.py",
+    "avs/manual_assets.py",
 )
 
 

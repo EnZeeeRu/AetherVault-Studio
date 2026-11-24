@@ -1120,7 +1120,7 @@
       </div>
     </div>
     <div style="display:flex; gap:5px; align-items:center;">
-      <button class="small-btn" onclick="startNewChat()">+ New</button>
+      <button class="small-btn" data-i18n="new_chat" onclick="startNewChat()">+ New</button>
       <button class="mobile-nav-btn" onclick="closeAllMobileSidebars()" style="background:#3f1d28; border-color:#ef4444; color:#fca5a5;" title="Close Chats Drawer">✕</button>
     </div>
   </div>
@@ -1129,20 +1129,20 @@
 
   <div class="sidebar-footer">
     <div style="display:flex; gap:5px;">
-      <button class="secondary small-btn" style="flex:1;" onclick="openUserCardInSettings(false)">👤 User Card & Persona</button>
-      <button class="secondary small-btn" style="flex:1;" onclick="openStudioModal('tab-backup')">📦 .ZIP / Import</button>
+      <button class="secondary small-btn" style="flex:1;" data-i18n="btn_user_card" onclick="openUserCardInSettings(false)">👤 User Card & Persona</button>
+      <button class="secondary small-btn" style="flex:1;" data-i18n="btn_zip" onclick="openStudioModal('tab-backup')">📦 .ZIP / Import</button>
     </div>
     <div style="display:flex; gap:5px;">
       <button class="secondary small-btn" style="flex:1;" onclick="openSpecPulseModal()" title="Open SpecPulse 60-FPS Hardware Monitor & Benchmark">📊 SpecPulse</button>
       <button class="secondary small-btn" style="flex:1;" onclick="openStudioModal('tab-terminal')" title="Open Web Terminal & GitHub OTA Updater">💻 Terminal</button>
-      <button class="secondary small-btn" style="flex:1;" onclick="openStudioModal('tab-manual')">📖 Manual</button>
+      <button class="secondary small-btn" style="flex:1;" data-i18n="btn_manual" onclick="openStudioModal('tab-manual')">📖 Manual</button>
     </div>
     <div style="display:flex; gap:5px;">
       <button class="secondary small-btn" style="flex:1;" onclick="exportCurrentChatMd()" title="Download active chat session as Markdown (.md)">📝 .MD</button>
-      <button class="secondary small-btn" style="flex:1;" onclick="openFolder('chat_logs')">📄 Logs</button>
+      <button class="secondary small-btn" style="flex:1;" data-i18n="btn_logs" onclick="openFolder('chat_logs')">📄 Logs</button>
       <button class="secondary small-btn" style="flex:1;" onclick="openStudioModal('tab-about')"><svg viewBox="0 0 18 12" width="15" height="10" style="vertical-align:-1px; border-radius:2px; box-shadow:0 0 2px rgba(0,0,0,0.4);" aria-label="Argentina"><rect width="18" height="4" y="0" fill="#74ACDF"/><rect width="18" height="4" y="4" fill="#FFFFFF"/><rect width="18" height="4" y="8" fill="#74ACDF"/><circle cx="9" cy="6" r="1.4" fill="#F6B40E"/></svg> About</button>
     </div>
-    <button class="secondary small-btn" style="width:100%; border-color:#ef4444; color:#fca5a5; margin-top:2px;" onclick="triggerSafeShutdown()" title="Save all memories/configs, wipe local .temp_cache, and shut down server safely">🛑 Safe Save & Shutdown</button>
+    <button class="secondary small-btn" style="width:100%; border-color:#ef4444; color:#fca5a5; margin-top:2px;" data-i18n="btn_shutdown" onclick="triggerSafeShutdown()" title="Save all memories/configs, wipe local .temp_cache, and shut down server safely">🛑 Safe Save & Shutdown</button>
   </div>
 </div>
 
@@ -1169,6 +1169,10 @@
       <option value="synth_sunset">80s Retro Synth</option>
       <option value="daylight_studio">Daylight Studio</option>
     </select>
+    <select id="quick-lang-select" onchange="switchStudioLanguage(this.value)" title="Switch Studio UI, Voice, Routers & Visual Manual Language" style="padding:3px 7px; font-size:0.75rem;">
+      <option value="en">🌐 EN</option>
+      <option value="es">🌐 ES</option>
+    </select>
     <button class="mobile-nav-btn" onclick="toggleMobileSidebar('control-sidebar')">🎛️ Studio</button>
   </div>
 
@@ -1177,6 +1181,14 @@
   <div id="attach-bar">
     <span id="attach-label">📎 Attached: none</span>
     <span class="del-btn" onclick="clearAttachment()">✖ Remove</span>
+  </div>
+
+  <div id="spellcheck-bar" style="display:none; padding:6px 12px; background:var(--panel); border-top:1px solid var(--border); font-size:0.77rem; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap;">
+    <span id="spellcheck-bar-msg" style="color:#bae6fd;"></span>
+    <div style="display:flex; gap:6px; align-items:center;">
+      <button class="small-btn" id="spellcheck-apply-btn" onclick="applySpellcheckSuggestion()">✅ Apply Fixes</button>
+      <button class="secondary small-btn" onclick="document.getElementById('spellcheck-bar').style.display='none'">✖</button>
+    </div>
   </div>
 
   <div id="input-bar">
@@ -1198,9 +1210,10 @@
       <option value="ef_dora">🎙️ Español (Femenina)</option>
       <option value="em_alex">🎙️ Español (Masculina)</option>
     </select>
-    <textarea id="user-input" rows="1" placeholder="Send a message... (Enter to send, Shift+Enter for new line, Ctrl+V or Drop file)" onkeydown="handleChatInputKeydown(event)" oninput="autoResizeChatInput(this)"></textarea>
-    <button id="stop-btn" class="stop-btn" onclick="stopGeneration()" title="Immediately Stop Generation">⏹️ Stop</button>
-    <button id="send-btn" onclick="sendMessage()">Send</button>
+    <textarea id="user-input" rows="1" spellcheck="true" lang="en" placeholder="Send a message... (Enter to send, Shift+Enter for new line, Ctrl+V or Drop file)" onkeydown="handleChatInputKeydown(event)" oninput="autoResizeChatInput(this)"></textarea>
+    <button class="secondary" id="spellcheck-btn" onclick="runInputSpellcheck()" title="Check spelling (Offline & Lore-Safe)">✨</button>
+    <button id="stop-btn" class="stop-btn" data-i18n="btn_stop" onclick="stopGeneration()" title="Immediately Stop Generation">⏹️ Stop</button>
+    <button id="send-btn" data-i18n="btn_send" onclick="sendMessage()">Send</button>
   </div>
 </div>
 
@@ -1428,14 +1441,14 @@
     </div>
 
     <div class="modal-tabs">
-      <button class="tab-btn active" onclick="switchModalTab('tab-identity', this)">🧬 Persona & User Card</button>
+      <button class="tab-btn active" data-i18n="tab_identity" onclick="switchModalTab('tab-identity', this)">🧬 Persona & User Card</button>
       <button class="tab-btn" onclick="switchModalTab('tab-theme', this)">🎨 Interactive Image Cropper & Theme</button>
       <button class="tab-btn" onclick="switchModalTab('tab-backup', this)">📦 .ZIP & Legacy Folder Import</button>
       <button class="tab-btn" onclick="switchModalTab('tab-smartapi', this)">☁️ Smart API & BYOK Keys</button>
-      <button class="tab-btn" onclick="switchModalTab('tab-integrations', this)">🔌 OSWorld, Telegram & Spotify</button>
+      <button class="tab-btn" data-i18n="tab_integrations" onclick="switchModalTab('tab-integrations', this)">🔌 Bridges, Language & Voice</button>
       <button class="tab-btn" onclick="switchModalTab('tab-terminal', this)">💻 Terminal &amp; OTA Update</button>
       <button class="tab-btn" onclick="switchModalTab('tab-diagnostics', this)">🛠️ Bugfixing, Sandbox & Self-Heal</button>
-      <button class="tab-btn" onclick="switchModalTab('tab-manual', this)">📖 Built-In Manual</button>
+      <button class="tab-btn" data-i18n="tab_manual" onclick="switchModalTab('tab-manual', this)">📖 Visual Manual</button>
       <button class="tab-btn" onclick="switchModalTab('tab-about', this)"><svg viewBox="0 0 18 12" width="15" height="10" style="vertical-align:-1px; border-radius:2px; box-shadow:0 0 2px rgba(0,0,0,0.4);" aria-label="Argentina"><rect width="18" height="4" y="0" fill="#74ACDF"/><rect width="18" height="4" y="4" fill="#FFFFFF"/><rect width="18" height="4" y="8" fill="#74ACDF"/><circle cx="9" cy="6" r="1.4" fill="#F6B40E"/></svg> About & Copyrights</button>
     </div>
 
@@ -1531,7 +1544,7 @@
           </div>
           <div class="form-group" style="margin-top:8px;">
             <label>Core Persona Directive (Synced to /priority_pdfs/CORE_PERSONA.txt)</label>
-            <textarea id="cfg-persona" rows="8" style="width:100%; font-family:monospace; font-size:0.79rem; line-height:1.45;"></textarea>
+            <textarea id="cfg-persona" rows="8" spellcheck="true" style="width:100%; font-family:monospace; font-size:0.79rem; line-height:1.45;"></textarea>
           </div>
           <button id="save-identity-btn" onclick="saveIdentityConfig()" style="width:100%; padding:10px;">💾 Save Companion Personality & Core Persona</button>
         </div>
@@ -1759,8 +1772,80 @@
         </div>
       </div>
 
-      <!-- TAB 4: INTEGRATIONS (OSWORLD, TELEGRAM, SPOTIFY, PC ROOTS) -->
+      <!-- TAB 4: INTEGRATIONS (LANGUAGE, SPELLCHECK, ARGOS, MCP, BLUESKY, TELEGRAM, SPOTIFY) -->
       <div class="tab-pane" id="tab-integrations">
+        <div class="card" style="margin-bottom:12px; border-color:#a855f7;">
+          <div class="card-header">
+            <h3 data-i18n="lang_card_title">🌐 Multi-Language, Offline Spellcheck &amp; Argos Translate</h3>
+            <button class="secondary small-btn" onclick="refreshLanguagePanel()">🔄 Refresh Status</button>
+          </div>
+          <p style="font-size:0.74rem; color:#9ca3af; margin:4px 0 8px 0;">
+            Switch the entire Studio UI, Visual Manual, voice microphone recognition, bilingual routers, Lore-safe offline spellcheck, and portable <code>models/translate/</code> Argos Translate packs.
+          </p>
+          <div class="form-grid" style="margin-bottom:8px;">
+            <div class="form-group" style="margin-bottom:0;">
+              <label>Studio UI &amp; Manual Language</label>
+              <select id="cfg-ui-lang" onchange="switchStudioLanguage(this.value)">
+                <option value="en">English (en)</option>
+                <option value="es">Español (es)</option>
+              </select>
+            </div>
+            <div class="form-group" style="margin-bottom:0;">
+              <label>Microphone Speech Recognition Locale (🎤)</label>
+              <select id="cfg-speech-locale">
+                <option value="en-US">English (US)</option>
+                <option value="en-GB">English (UK)</option>
+                <option value="es-AR">Español (Argentina)</option>
+                <option value="es-ES">Español (España)</option>
+                <option value="es-MX">Español (México)</option>
+                <option value="pt-BR">Português (Brasil)</option>
+                <option value="fr-FR">Français (France)</option>
+                <option value="de-DE">Deutsch (Deutschland)</option>
+                <option value="it-IT">Italiano (Italia)</option>
+                <option value="ja-JP">日本語 (Japan)</option>
+              </select>
+            </div>
+            <div class="form-group" style="margin-bottom:0;">
+              <label>Model Translation Bridge</label>
+              <select id="cfg-translate-bridge">
+                <option value="native">Native Model Language (Recommended for Gemma 4 / Qwen / Gemini)</option>
+                <option value="argos_bridge">Argos Offline Bridge (For English-Only GGUFs)</option>
+              </select>
+            </div>
+            <div class="form-group" style="margin-bottom:0; display:flex; align-items:flex-end;">
+              <label style="font-size:0.78rem; cursor:pointer; display:flex; align-items:center; gap:6px; margin-bottom:6px;">
+                <input type="checkbox" id="cfg-spellcheck-enabled" checked> Enable Native &amp; Lore-Safe Offline Spellcheck
+              </label>
+            </div>
+          </div>
+          <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap; padding-top:6px; border-top:1px solid var(--border);">
+            <span style="font-size:0.74rem; color:#cbd5e1; font-weight:600;">Offline Argos Pack:</span>
+            <select id="cfg-argos-from" style="font-size:0.74rem; padding:4px 6px;">
+              <option value="en" selected>EN (English)</option>
+              <option value="es">ES (Español)</option>
+              <option value="pt">PT (Português)</option>
+              <option value="fr">FR (Français)</option>
+              <option value="de">DE (Deutsch)</option>
+              <option value="it">IT (Italiano)</option>
+              <option value="ja">JA (日本語)</option>
+            </select>
+            <span style="color:#9ca3af;">→</span>
+            <select id="cfg-argos-to" style="font-size:0.74rem; padding:4px 6px;">
+              <option value="es" selected>ES (Español)</option>
+              <option value="en">EN (English)</option>
+              <option value="pt">PT (Português)</option>
+              <option value="fr">FR (Français)</option>
+              <option value="de">DE (Deutsch)</option>
+              <option value="it">IT (Italiano)</option>
+              <option value="ja">JA (日本語)</option>
+            </select>
+            <button class="small-btn" onclick="installArgosPackFromUI()">⬇️ Download Offline Pack</button>
+            <button class="secondary small-btn" onclick="installArgosPairBothWays()">⇄ Install Both Ways</button>
+          </div>
+          <div id="lang-status-box" style="font-size:0.73rem; color:#9ca3af; margin-top:7px; padding:7px 9px; border-radius:6px; background:var(--bg); border:1px solid var(--border); line-height:1.45;">
+            Checking installed offline language libraries &amp; packs...
+          </div>
+        </div>
         
         <div class="card" style="margin-bottom:12px; border-color:#38bdf8;">
           <div class="card-header">
@@ -2003,22 +2088,28 @@ print("Sandbox working dir:", os.getcwd())</textarea>
         </div>
       </div>
 
-      <!-- TAB 5.5: EMBEDDED IN-APP MANUAL & PDF READER -->
+      <!-- TAB 5.5: VISUAL ILLUSTRATED IN-APP MANUAL & PDF READER -->
       <div class="tab-pane" id="tab-manual">
-        <div class="card" style="margin-bottom:10px; display:flex; justify-content:space-between; align-items:center; gap:10px;">
-          <div>
-            <h3>📖 AetherVault Studio v6.8 Bluesky — Built-In Interactive Manual</h3>
-            <div style="font-size:0.74rem; color:#9ca3af; margin-top:3px;">
-              Indexed into your companion's brain via <code>[[SELF:manual|...]]</code> and readable right here in-app!
+        <div class="card" style="margin-bottom:10px; background:linear-gradient(135deg, rgba(124,58,237,0.16), rgba(2,132,199,0.12)); border-color:var(--accent); display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+          <div style="display:flex; align-items:center; gap:10px;">
+            <img src="/logo.svg" style="width:42px; height:42px; flex-shrink:0;" alt="AVS">
+            <div>
+              <h3 data-i18n="manual_title" style="margin:0;">📖 AetherVault Studio v6.8 Bluesky — Visual Interactive Manual</h3>
+              <div data-i18n="manual_subtitle" style="font-size:0.74rem; color:#cbd5e1; margin-top:3px;">
+                Complete illustrated guide with SVG diagrams, Workbench cheat sheets &amp; troubleshooting — also indexed into your AI via <code>[[SELF:manual|...]]</code>!
+              </div>
             </div>
           </div>
-          <div style="display:flex; gap:6px;">
-            <button class="secondary small-btn" onclick="window.open('/manual/pdf', '_blank')">📄 Open PDF in New Tab</button>
-            <a href="/manual/pdf" download="AetherVault_Studio_Manual.pdf"><button class="small-btn">⬇️ Download PDF</button></a>
+          <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+            <button class="secondary small-btn" id="manual-lang-en-btn" onclick="loadManualTab('en')">🇬🇧 EN</button>
+            <button class="secondary small-btn" id="manual-lang-es-btn" onclick="loadManualTab('es')">🇦🇷 ES</button>
+            <button class="secondary small-btn" data-i18n="manual_open_pdf" onclick="window.open('/manual/pdf', '_blank')">📄 Open PDF in New Tab</button>
+            <a href="/manual/pdf" download="AetherVault_Studio_Manual.pdf"><button class="small-btn" data-i18n="manual_dl_pdf">⬇️ Download Illustrated PDF</button></a>
           </div>
         </div>
-        <input id="manual-search-input" placeholder="🔍 Filter manual sections (e.g. voice, Gear 1, Cashier, folder import, ERR-04)..." style="width:100%; margin-bottom:10px;" oninput="filterManualSections(this.value)">
-        <div id="manual-sections-box" style="display:flex; flex-direction:column; gap:8px;"></div>
+        <div id="manual-toc-bar" style="display:flex; gap:5px; flex-wrap:wrap; margin-bottom:8px;"></div>
+        <input id="manual-search-input" placeholder="🔍 Filter manual sections (e.g. voice, spellcheck, Argos, Bluesky, Workbench, ERR-04)..." style="width:100%; margin-bottom:10px;" oninput="filterManualSections(this.value)">
+        <div id="manual-sections-box" style="display:flex; flex-direction:column; gap:12px;"></div>
       </div>
 
       <!-- TAB 6: ABOUT, CREDITS & COPYRIGHT REGISTRY -->
@@ -3307,24 +3398,70 @@ async function inspectTypedFolder(pathStr) {
   }
 }
 
-async function loadManualTab() {
-  const res = await fetch('/manual/content');
+async function loadManualTab(overrideLang = '') {
+  const useLang = (overrideLang || (window.workspaceConfig && window.workspaceConfig.ui_language) || 'en').slice(0, 2);
+  window.activeManualLang = useLang;
+  const res = await fetch('/manual/content?lang=' + encodeURIComponent(useLang));
   const data = await res.json();
   window.manualSectionsCache = data.sections || [];
+  const enBtn = document.getElementById('manual-lang-en-btn');
+  const esBtn = document.getElementById('manual-lang-es-btn');
+  if (enBtn) enBtn.style.borderColor = (useLang === 'en') ? 'var(--accent-soft)' : 'var(--border)';
+  if (esBtn) esBtn.style.borderColor = (useLang === 'es') ? 'var(--accent-soft)' : 'var(--border)';
+  const tocBar = document.getElementById('manual-toc-bar');
+  if (tocBar) {
+    tocBar.innerHTML = window.manualSectionsCache.map(s => `
+      <button class="secondary small-btn" style="font-size:0.7rem; padding:3px 8px;" onclick="jumpToManualSection('man-sec-${escapeHtml(s.id)}')">${escapeHtml(s.title.split('.')[0])}. ${escapeHtml(s.badge || s.id)}</button>
+    `).join('');
+  }
   filterManualSections(document.getElementById('manual-search-input').value || '');
+}
+
+function jumpToManualSection(domId) {
+  const el = document.getElementById(domId);
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 function filterManualSections(q) {
   const low = (q || '').toLowerCase().trim();
   const box = document.getElementById('manual-sections-box');
   if (!box) return;
-  const filtered = window.manualSectionsCache.filter(s => !low || s.title.toLowerCase().includes(low) || s.body.toLowerCase().includes(low));
-  box.innerHTML = filtered.map(s => `
-    <div class="card">
-      <h3 style="margin-bottom:5px;">${escapeHtml(s.title)}</h3>
-      <div style="font-size:0.79rem; color:#d1d5db; line-height:1.5;">${escapeHtml(s.body)}</div>
-    </div>
-  `).join('') || '<div style="color:#9ca3af;">No matching manual sections.</div>';
+  const filtered = (window.manualSectionsCache || []).filter(s =>
+    !low ||
+    (s.title || '').toLowerCase().includes(low) ||
+    (s.summary || '').toLowerCase().includes(low) ||
+    (s.badge || '').toLowerCase().includes(low) ||
+    (s.body || '').toLowerCase().includes(low)
+  );
+  box.innerHTML = filtered.map(s => {
+    const badgeHtml = s.badge
+      ? `<span style="font-size:0.66rem; font-weight:700; letter-spacing:0.6px; padding:2px 7px; border-radius:999px; background:rgba(124,58,237,0.22); color:var(--accent-soft); border:1px solid rgba(167,139,250,0.35);">${escapeHtml(s.badge)}</span>`
+      : '';
+    const sumHtml = s.summary
+      ? `<div style="font-size:0.77rem; color:#93c5fd; margin:4px 0 8px 0;">${escapeHtml(s.summary)}</div>`
+      : '';
+    const svgHtml = s.svg
+      ? `<div style="margin:8px 0 10px 0; border-radius:10px; overflow:hidden; background:#090d1a; border:1px solid rgba(56,189,248,0.22); padding:4px;">${s.svg}</div>`
+      : '';
+    const formattedBody = escapeHtml(s.body || '')
+      .replace(/\n/g, '<br>')
+      .replace(/(^|<br>)(- )/g, '$1<span style="color:var(--accent-soft); font-weight:700;">• </span>');
+    const tipHtml = s.tip
+      ? `<div style="margin-top:9px; padding:7px 10px; border-radius:7px; background:rgba(124,58,237,0.12); border-left:3px solid var(--accent-soft); font-size:0.75rem; color:#e9d5ff;"><b>💡 Tip:</b> ${escapeHtml(s.tip)}</div>`
+      : '';
+    return `
+      <div class="card" id="man-sec-${escapeHtml(s.id)}" style="border-color:rgba(124,58,237,0.28);">
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;">
+          <h3 style="margin:0; font-size:0.95rem; color:#fff;">${escapeHtml(s.title)}</h3>
+          ${badgeHtml}
+        </div>
+        ${sumHtml}
+        ${svgHtml}
+        <div style="font-size:0.79rem; color:#d1d5db; line-height:1.58;">${formattedBody}</div>
+        ${tipHtml}
+      </div>
+    `;
+  }).join('') || '<div style="color:#9ca3af;">No matching manual sections.</div>';
 }
 
 
@@ -3726,6 +3863,14 @@ async function refreshStatus() {
     if (voiceSel && document.activeElement !== voiceSel && data.config && data.config.voice_profile) {
       voiceSel.value = data.config.voice_profile;
     }
+    if (data.config && data.config.ui_language && window.appliedUiLang !== data.config.ui_language) {
+      applyStudioLocale(data.config.ui_language);
+    }
+    const uInpSpell = document.getElementById('user-input');
+    if (uInpSpell && data.config) {
+      uInpSpell.spellcheck = (data.config.spellcheck_enabled !== false);
+      uInpSpell.lang = data.config.ui_language || 'en';
+    }
 
     const activeApiStr = data.active_api_label
       ? ('☁️ API: ' + data.active_api_label)
@@ -4103,8 +4248,13 @@ async function openStudioModal(tabId) {
     const btn = document.querySelector(`.tab-btn[onclick*="${tabId}"]`);
     switchModalTab(tabId, btn);
   }
+  if (document.getElementById('cfg-ui-lang')) document.getElementById('cfg-ui-lang').value = cfg.ui_language || 'en';
+  if (document.getElementById('cfg-speech-locale')) document.getElementById('cfg-speech-locale').value = cfg.speech_locale || 'en-US';
+  if (document.getElementById('cfg-translate-bridge')) document.getElementById('cfg-translate-bridge').value = cfg.translate_bridge_mode || 'native';
+  if (document.getElementById('cfg-spellcheck-enabled')) document.getElementById('cfg-spellcheck-enabled').checked = cfg.spellcheck_enabled !== false;
   if (tabId === 'tab-about') loadAboutRegistry();
   if (tabId === 'tab-manual') loadManualTab();
+  if (tabId === 'tab-integrations') refreshLanguagePanel();
   if (tabId === 'tab-identity') setTimeout(initUserCardLeafletMap, 120);
 }
 
@@ -4120,6 +4270,7 @@ function switchModalTab(tabId, btnEl) {
   if (btnEl) btnEl.classList.add('active');
   if (tabId === 'tab-about') loadAboutRegistry();
   if (tabId === 'tab-manual') loadManualTab();
+  if (tabId === 'tab-integrations') refreshLanguagePanel();
   if (tabId === 'tab-identity') setTimeout(initUserCardLeafletMap, 120);
 }
 
@@ -4373,6 +4524,10 @@ async function sendBlueskyTestPost() {
 
 async function saveIntegrationsConfig() {
   const payload = {
+    ui_language: (document.getElementById('cfg-ui-lang') ? document.getElementById('cfg-ui-lang').value : 'en'),
+    speech_locale: (document.getElementById('cfg-speech-locale') ? document.getElementById('cfg-speech-locale').value : 'en-US'),
+    translate_bridge_mode: (document.getElementById('cfg-translate-bridge') ? document.getElementById('cfg-translate-bridge').value : 'native'),
+    spellcheck_enabled: (document.getElementById('cfg-spellcheck-enabled') ? document.getElementById('cfg-spellcheck-enabled').checked : true),
     mcp_auth_token: (document.getElementById('cfg-mcp-token') ? document.getElementById('cfg-mcp-token').value.trim() : ''),
     osworld_enabled: document.getElementById('cfg-osworld-enabled').checked,
     telegram: {
@@ -4915,7 +5070,9 @@ function toggleVoiceInput() {
   if (!SR) return alert("Voice recognition requires Chrome or Edge.");
   const micBtn = document.getElementById('mic-btn');
   const rec = new SR();
-  rec.lang = 'en-US';
+  rec.lang = (window.workspaceConfig && window.workspaceConfig.speech_locale)
+    || (window.activeLocalePack && window.activeLocalePack.meta && window.activeLocalePack.meta.speech)
+    || 'en-US';
   micBtn.innerText = '🔴';
   rec.onresult = (e) => {
     document.getElementById('user-input').value = e.results[0][0].transcript;
@@ -5001,6 +5158,12 @@ function buildBubbleActionsBar(role, rawText, msgId = null) {
     setTimeout(() => { cBtn.innerText = '📋 Copy'; }, 1200);
   };
   actBar.appendChild(cBtn);
+
+  const trBtn = document.createElement('button');
+  trBtn.className = 'msg-act-btn';
+  trBtn.innerText = (window.activeLocalePack && window.activeLocalePack.ui && window.activeLocalePack.ui.btn_translate) || '🌐 Translate';
+  trBtn.onclick = () => translateChatBubble(trBtn, rawText || '');
+  actBar.appendChild(trBtn);
 
   if (role === 'assistant') {
     const rBtn = document.createElement('button');
@@ -5205,6 +5368,205 @@ async function triggerBackendRestart() {
     }
   }, { passive: true });
 })();
+
+
+// =====================================================================
+// UNIVERSAL MULTI-LANGUAGE, LORE-SAFE SPELLCHECK & ARGOS TRANSLATE UI
+// =====================================================================
+window.appliedUiLang = '';
+window.activeLocalePack = null;
+window.lastSpellcheckCorrected = '';
+
+async function applyStudioLocale(langCode) {
+  const code = (langCode || 'en').slice(0, 2).toLowerCase();
+  try {
+    const res = await fetch('/api/lang/locale/' + encodeURIComponent(code));
+    if (!res.ok) return;
+    const pack = await res.json();
+    window.activeLocalePack = pack;
+    window.appliedUiLang = code;
+    const uiMap = pack.ui || {};
+    document.querySelectorAll('[data-i18n]').forEach(el => {
+      const k = el.getAttribute('data-i18n');
+      if (k && uiMap[k]) el.textContent = uiMap[k];
+    });
+    const inp = document.getElementById('user-input');
+    if (inp) {
+      if (uiMap.input_placeholder) inp.placeholder = uiMap.input_placeholder;
+      inp.lang = code;
+    }
+    const mSearch = document.getElementById('manual-search-input');
+    if (mSearch && uiMap.manual_search_ph) mSearch.placeholder = uiMap.manual_search_ph;
+    const spBtn = document.getElementById('spellcheck-btn');
+    if (spBtn && uiMap.btn_spellcheck) spBtn.title = uiMap.btn_spellcheck;
+    const qSel = document.getElementById('quick-lang-select');
+    if (qSel && qSel.value !== code) qSel.value = code;
+    const cSel = document.getElementById('cfg-ui-lang');
+    if (cSel && cSel.value !== code) cSel.value = code;
+  } catch (e) {
+    console.warn('Locale load error:', e);
+  }
+}
+
+async function switchStudioLanguage(langCode) {
+  const code = (langCode || 'en').slice(0, 2).toLowerCase();
+  const defaultSpeech = (code === 'es') ? 'es-AR' : 'en-US';
+  await applyStudioLocale(code);
+  try {
+    await fetch('/config/update', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ ui_language: code, speech_locale: defaultSpeech })
+    });
+    if (window.workspaceConfig) {
+      window.workspaceConfig.ui_language = code;
+      window.workspaceConfig.speech_locale = defaultSpeech;
+    }
+    const spSel = document.getElementById('cfg-speech-locale');
+    if (spSel) spSel.value = defaultSpeech;
+    const manPane = document.getElementById('tab-manual');
+    if (manPane && manPane.classList.contains('active')) loadManualTab(code);
+    showToast(code === 'es' ? '🌐 Idioma del Estudio: Español (es-AR)' : '🌐 Studio Language: English (en-US)');
+  } catch (e) {
+    console.warn('Language switch error:', e);
+  }
+}
+
+async function runInputSpellcheck() {
+  const inp = document.getElementById('user-input');
+  const bar = document.getElementById('spellcheck-bar');
+  const msgEl = document.getElementById('spellcheck-bar-msg');
+  const applyBtn = document.getElementById('spellcheck-apply-btn');
+  if (!inp || !bar || !msgEl) return;
+  const txt = inp.value || '';
+  if (!txt.trim()) {
+    showToast('✨ Type a message first to check spelling!');
+    return;
+  }
+  bar.style.display = 'flex';
+  msgEl.innerHTML = '⏳ Checking spelling (Lore-safe offline)...';
+  if (applyBtn) applyBtn.style.display = 'none';
+  try {
+    const res = await fetch('/api/lang/spellcheck', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ text: txt, lang: 'auto' })
+    });
+    const d = await res.json();
+    if (!d.issues || d.issues.length === 0) {
+      msgEl.innerHTML = `✅ Clean! (Detected: <b>${escapeHtml(d.lang || 'en')}</b> | Engine: ${escapeHtml(d.engine || '')} | Lore whitelist: ${d.whitelisted_count || 0} words)${d.hint ? ' — <span style="color:#fcd34d;">' + escapeHtml(d.hint) + '</span>' : ''}`;
+      window.lastSpellcheckCorrected = '';
+      setTimeout(() => { if (bar) bar.style.display = 'none'; }, 4200);
+      return;
+    }
+    window.lastSpellcheckCorrected = d.corrected || txt;
+    const preview = d.issues.slice(0, 6).map(it =>
+      `<code>${escapeHtml(it.word)}</code> → <b style="color:#6ee7b7;">${escapeHtml((it.suggestions || [''])[0])}</b>`
+    ).join(' · ');
+    msgEl.innerHTML = `✨ Found ${d.issues.length} typo(s) [${escapeHtml(d.lang)}]: ${preview}`;
+    if (applyBtn) applyBtn.style.display = 'inline-block';
+  } catch (e) {
+    msgEl.innerHTML = '⚠️ Spellcheck error: ' + escapeHtml(String(e));
+  }
+}
+
+function applySpellcheckSuggestion() {
+  const inp = document.getElementById('user-input');
+  const bar = document.getElementById('spellcheck-bar');
+  if (inp && window.lastSpellcheckCorrected) {
+    inp.value = window.lastSpellcheckCorrected;
+    autoResizeChatInput(inp);
+    inp.focus();
+  }
+  if (bar) bar.style.display = 'none';
+}
+
+async function translateChatBubble(btnEl, rawText) {
+  const bubble = btnEl.closest('.msg');
+  if (!bubble) return;
+  const existing = bubble.querySelector('.bubble-translation-box');
+  if (existing) {
+    existing.remove();
+    return;
+  }
+  const origLbl = btnEl.innerText;
+  btnEl.innerText = '⏳ ...';
+  const uiLang = (window.workspaceConfig && window.workspaceConfig.ui_language) || 'en';
+  try {
+    // First attempt translating into active UI language; if already in UI language, flip EN <-> ES
+    let res = await fetch('/api/lang/translate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ text: rawText, to: uiLang, from: 'auto' })
+    });
+    let d = await res.json();
+    if (d.ok && d.engine === 'identity') {
+      const altLang = (d.from_lang === 'es') ? 'en' : 'es';
+      res = await fetch('/api/lang/translate', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ text: rawText, to: altLang, from: d.from_lang })
+      });
+      d = await res.json();
+    }
+    const box = document.createElement('div');
+    box.className = 'bubble-translation-box';
+    box.style.cssText = 'margin-top:8px; padding:8px 10px; border-radius:8px; background:rgba(2,132,199,0.12); border-left:3px solid #38bdf8; font-size:0.83rem; line-height:1.5; color:#e0f2fe;';
+    if (d.ok) {
+      box.innerHTML = `<div style="font-size:0.68rem; color:#7dd3fc; font-weight:700; margin-bottom:4px;">🌐 Offline Translation (${escapeHtml(d.from_lang)} → ${escapeHtml(d.to_lang)} via ${escapeHtml(d.engine)})</div><div>${escapeHtml(d.translated || '').replace(/\\n/g, '<br>')}</div>`;
+    } else {
+      box.innerHTML = `<div style="color:#fcd34d; font-size:0.77rem;">⚠️ ${escapeHtml(d.error || 'Offline translator unavailable.')}</div>`;
+    }
+    bubble.appendChild(box);
+  } catch (e) {
+    showToast('⚠️ Translate failed: ' + e);
+  } finally {
+    btnEl.innerText = origLbl;
+  }
+}
+
+async function refreshLanguagePanel() {
+  const box = document.getElementById('lang-status-box');
+  if (!box) return;
+  try {
+    const res = await fetch('/api/lang/status');
+    const d = await res.json();
+    const pairs = (d.installed_argos_pairs || []).map(p => `<code>${escapeHtml(p.pair)}</code>`).join(', ') || '<i>None downloaded yet</i>';
+    box.innerHTML = `
+      <div>• <b>PySpellChecker:</b> ${d.pyspellchecker_installed ? '<span style="color:#6ee7b7;">Installed</span>' : '<span style="color:#fcd34d;">Fallback Mode (install in API &amp; Library Manager)</span>'} | <b>Lore Whitelist:</b> ${d.lore_whitelist_size || 0} terms</div>
+      <div>• <b>Argos Translate:</b> ${d.argostranslate_installed ? '<span style="color:#6ee7b7;">Installed</span>' : '<span style="color:#fcd34d;">Not installed (install in API &amp; Library Manager)</span>'} | <b>LangID:</b> ${d.langid_installed ? 'Installed' : 'Built-in Heuristic'}</div>
+      <div>• <b>Installed Offline Translation Packs (<code>models/translate/</code>):</b> ${pairs}</div>
+    `;
+  } catch (e) {
+    box.innerText = 'Could not read language status: ' + e;
+  }
+}
+
+async function installArgosPackFromUI(fromCode = '', toCode = '') {
+  const fc = fromCode || (document.getElementById('cfg-argos-from') ? document.getElementById('cfg-argos-from').value : 'en');
+  const tc = toCode || (document.getElementById('cfg-argos-to') ? document.getElementById('cfg-argos-to').value : 'es');
+  const box = document.getElementById('lang-status-box');
+  if (box) box.innerHTML = `⏳ Downloading offline Argos Translate pack <code>${escapeHtml(fc)} → ${escapeHtml(tc)}</code> into <code>models/translate/</code>...`;
+  try {
+    const res = await fetch('/api/lang/install_pack', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ from_code: fc, to_code: tc })
+    });
+    const d = await res.json();
+    showToast(d.ok ? ('✅ ' + (d.message || 'Pack installed!')) : ('⚠️ ' + (d.error || 'Install failed')));
+    await refreshLanguagePanel();
+  } catch (e) {
+    if (box) box.innerText = 'Error installing pack: ' + e;
+  }
+}
+
+async function installArgosPairBothWays() {
+  const fc = document.getElementById('cfg-argos-from') ? document.getElementById('cfg-argos-from').value : 'en';
+  const tc = document.getElementById('cfg-argos-to') ? document.getElementById('cfg-argos-to').value : 'es';
+  await installArgosPackFromUI(fc, tc);
+  await installArgosPackFromUI(tc, fc);
+}
 
 startBootResourceToast();
 refreshStatus();

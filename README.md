@@ -61,6 +61,9 @@
 ---
 
 <a id="architecture"></a>
+* **🌐 Universal Multi-Language, Lore-Safe Spellcheck & Offline Argos Translate (`avs/language_tools.py`, `locales/`):** Instant 1-click **English / Español** Studio UI & Visual Manual switching (`locales/en.json`, `locales/es.json`), language-aware microphone recognition (`es-AR`, `en-US`, etc.), bilingual weather/Spotify/web routers, Lore-safe offline spell checking (`pyspellchecker` + `langid` auto-whitelisting your `glossary_index.json` and character names), and portable offline neural translation (`argostranslate` storing language packs in `models/translate/`).
+* **📖 Stylized Visual Interactive Manual & 4-Page Illustrated PDF (`avs/manual_assets.py`, `AetherVault_Studio_Manual.pdf`):** Built-in bilingual (EN/ES) manual with inline vector SVG architecture diagrams, quick-jump section chips, and a matching 4-page vector-illustrated PDF manual.
+
 ## 🧱 Modular Architecture (`avs/`)
 
 AetherVault Studio v6.8 separates its **frozen bootstrapper layer** (`Launch.bat`, `Launch.sh`, `manager.py`) from its **live runtime** (`assistant_server.py`, `ui_studio.html`, and the modular `avs/` package):

@@ -135,7 +135,11 @@ from avs import turn_pipeline as avs_turn_pipeline
 from avs import model_polish as avs_model_polish
 from avs.contracts import ToolSpec, ToolResult
 from avs import memory_graph as avs_memory_graph
+from avs import language_tools as avs_lang
+from avs import manual_assets as avs_manual
 BASE_DIR = Path(__file__).parent.resolve()
+LOCALES_DIR = BASE_DIR / "locales"
+LOCALES_DIR.mkdir(parents=True, exist_ok=True)
 PDF_DIR = BASE_DIR / "priority_pdfs"
 LORE_SUBDIR = PDF_DIR / "lore"
 MODEL_DIR = BASE_DIR / "models"
@@ -162,8 +166,10 @@ MANUAL_PDF_PATH = BASE_DIR / "AetherVault_Studio_Manual.pdf"
 CONFIG_PATH = BASE_DIR / "workspace_config.json"
 UI_HTML_PATH = BASE_DIR / "ui_studio.html"
 
-for d in (PDF_DIR, LORE_SUBDIR, MODEL_DIR, IMG_MODEL_DIR, MUSIC_MODEL_DIR, VOICE_MODEL_DIR, VISION_MODEL_DIR, HF_CACHE_DIR, MEMORY_DIR, CHAT_LOG_DIR, GEN_IMG_DIR, GEN_AUDIO_DIR, ASSETS_DIR, BACKUPS_DIR, CUSTOM_TOOLS_DIR, TEMP_SESSION_DIR):
+TRANSLATE_MODEL_DIR = MODEL_DIR / "translate"
+for d in (PDF_DIR, LORE_SUBDIR, MODEL_DIR, IMG_MODEL_DIR, MUSIC_MODEL_DIR, VOICE_MODEL_DIR, VISION_MODEL_DIR, TRANSLATE_MODEL_DIR, HF_CACHE_DIR, MEMORY_DIR, CHAT_LOG_DIR, GEN_IMG_DIR, GEN_AUDIO_DIR, ASSETS_DIR, BACKUPS_DIR, CUSTOM_TOOLS_DIR, LOCALES_DIR, TEMP_SESSION_DIR):
     d.mkdir(parents=True, exist_ok=True)
+avs_lang.configure_portable_argos_dir(MODEL_DIR)
 
 os.environ["HF_HOME"] = str(HF_CACHE_DIR)
 LLM_LOCK = threading.Lock()
@@ -326,7 +332,11 @@ DEFAULT_CONFIG = {
     "auto_web_search": True,
     "unrestricted_tokens": True,
     "idle_unload_minutes": 10,
-    "mcp_auth_token": ""
+    "mcp_auth_token": "",
+    "ui_language": "en",
+    "speech_locale": "en-US",
+    "spellcheck_enabled": True,
+    "translate_bridge_mode": "native"
 }
 
 def load_workspace_config() -> dict:
@@ -943,7 +953,9 @@ CAPABILITY_QUERY_PATTERNS = (
 
 FAST_WEB_INTENT_PATTERNS = (
     "search ", "search for ", "google ", "duckduckgo ", "weather in ", "weather for ",
-    "latest news", "current news", "what is the weather", "look up ", "who won ", "price of "
+    "latest news", "current news", "what is the weather", "look up ", "who won ", "price of ",
+    "buscar ", "buscá ", "busca en ", "clima en ", "tiempo en ", "pronostico ", "pronóstico ",
+    "noticias de ", "ultimas noticias", "últimas noticias", "precio de ", "quien gano", "quién ganó"
 )
 
 TAXING_TASK_KEYWORDS = {
@@ -1159,7 +1171,7 @@ def _osm_nominatim_request(endpoint: str, params: dict) -> dict:
             params={**params, "format": "jsonv2"},
             headers={
                 "User-Agent": f"AetherVaultStudio/{APP_VERSION} (Local Portable Desktop AI Workstation)",
-                "Accept-Language": "en"
+                "Accept-Language": (WORKSPACE_CFG.get("ui_language") or "en")
             },
             timeout=10
         )
@@ -1204,7 +1216,7 @@ def search_places_for_map(query: str) -> dict:
     try:
         g_resp = requests.get(
             "https://geocoding-api.open-meteo.com/v1/search",
-            params={"name": q, "count": 6, "language": "en", "format": "json"},
+            params={"name": q, "count": 6, "language": (WORKSPACE_CFG.get("ui_language") or "en")[:2], "format": "json"},
             timeout=10
         )
         if g_resp.status_code == 200:
@@ -1404,9 +1416,12 @@ def clean_web_search_query(raw_msg: str) -> str:
 def detect_weather_intent(user_msg: str) -> tuple:
     """Returns (is_weather_query, target_city_or_empty)."""
     low = (user_msg or "").lower()
-    if not any(k in low for k in ("weather", "climate", "temperature", "forecast", "raining", "rain today", "hot outside", "cold outside")):
+    if not any(k in low for k in (
+        "weather", "climate", "temperature", "forecast", "raining", "rain today", "hot outside", "cold outside",
+        "clima", "pronostico", "pronóstico", "temperatura", "lluvia", "lloviendo", "va a llover", "hace calor", "hace frio", "hace frío"
+    )):
         return False, ""
-    m = re.search(r"\b(?:in|for|at)\s+([A-Z][a-zA-Z\s,]{2,40}?)(?:\?|$|\.|!|\btoday\b|\bnow\b|\bright now\b)", user_msg)
+    m = re.search(r"\b(?:in|for|at|en|para)\s+([A-ZÁÉÍÓÚÑ][a-zA-Záéíóúüñ\s,]{2,40}?)(?:\?|$|\.|!|\btoday\b|\bnow\b|\bright now\b|\bhoy\b|\bahora\b)", user_msg)
     if m:
         cand = m.group(1).strip(" ,.?!-")
         if cand.lower() not in ("the internet", "my city", "my area", "the city where i live", "the city where i live irl"):
@@ -2885,6 +2900,7 @@ WORKBENCH_HELP_TOPICS = {
     "memory": "vault.profile() | vault.update_profile(...) | vault.memory_save(cat, fact) | vault.memory_list() | vault.forget(id_or_keyword) | vault.lore('keywords')",
     "knowledge": "vault.knowledge_list() | vault.knowledge_read(file) | vault.knowledge_write('lore/note.md', text, mode='lore') | vault.knowledge_mode(file, 'core'|'lore') | vault.knowledge_delete(file)",
     "media": "vault.generate_image('prompt') | vault.generate_music('prompt', duration=8) | vault.propose_core_fix(file, old, new, reason)",
+    "language": "vault.spellcheck(text, lang='auto') | vault.translate(text, to='en', src='auto') | vault.detect_lang(text)",
     "gauntlet": "vault.test_all(include_active=False) | vault.test_step('tool_name')"
 }
 
@@ -3310,6 +3326,9 @@ class _LiveInProcessVault:
     def create_tool(self, name, code, test_code=""): return create_and_verify_custom_tool(str(name), str(code), str(test_code))
     def reload_tools(self): return reload_custom_tools()
     def hf_inspect(self, repo_id): return inspect_huggingface_repo(str(repo_id))
+    def detect_lang(self, text): return avs_lang.detect_language(str(text or ""), default=(WORKSPACE_CFG.get("ui_language") or "en"))
+    def spellcheck(self, text, lang="auto"): return run_lore_safe_spellcheck(str(text or ""), lang=str(lang or "auto"))
+    def translate(self, text, to="en", src="auto"): return avs_lang.translate_text(str(text or ""), to_lang=str(to or "en"), from_lang=str(src or "auto"), model_dir=MODEL_DIR)
     def open_app(self, app): return execute_workbench_rpc_action("open_app", {"app": app}).get("result")
     def run_cmd(self, command): return execute_workbench_rpc_action("run_cmd", {"command": command}).get("result")
     def toggle(self, setting, value): return execute_workbench_rpc_action("toggle", {"setting": setting, "value": value}).get("result")
@@ -3603,7 +3622,9 @@ OPERATOR_INTENT_PATTERNS = (
     "current song", "playing right now", "what am i listening", "playlist", "playlists", "album", "wich one", "which one", "dont change", "don't change", "take a look", "changed the song",
     "open steam", "open discord", "open spotify", "open notepad", "open brave", "open chrome", "locate the exe",
     "gauntlet", "tool gauntlet", "full tool test", "test all your tools", "test all we have", "test every tool", "test every single tool", "step by step test", "step-by-step test", "run the gauntlet",
-    "user card", "profile card", "update my profile", "update your persona", "change your name", "forget that", "delete memory", "custom theme", "rename this chat", "knowledge tree"
+    "user card", "profile card", "update my profile", "update your persona", "change your name", "forget that", "delete memory", "custom theme", "rename this chat", "knowledge tree",
+    "clima", "pronostico", "pronóstico", "temperatura", "buscar en internet", "busca en internet", "noticias", "mi pc", "mis archivos", "captura de pantalla", "escritorio",
+    "poné ", "pone ", "reproducir", "reproducí", "canción", "cancion", "siguiente canción", "pausar música", "traducir", "traducción", "ortografía", "revisar ortografía"
 )
 
 def is_operator_or_system_query(user_msg: str) -> bool:
@@ -5054,7 +5075,8 @@ def search_google_news_rss(query: str, max_results: int = 5) -> list:
     q = (query or "").strip()
     if not q or STATE.get("offline_mode"):
         return []
-    url = f"https://news.google.com/rss/search?q={quote(q)}&hl=en-US&gl=US&ceid=US:en"
+    _lang_meta = avs_lang.SUPPORTED_UI_LOCALES.get((WORKSPACE_CFG.get("ui_language") or "en")[:2], avs_lang.SUPPORTED_UI_LOCALES["en"])
+    url = f"https://news.google.com/rss/search?q={quote(q)}&hl={_lang_meta['news_hl']}&gl={_lang_meta['news_gl']}&ceid={_lang_meta['news_ceid']}"
     try:
         r = requests.get(url, headers={"User-Agent": f"AetherVaultStudio/{APP_VERSION}"}, timeout=8)
         if r.status_code != 200 or not r.text:
@@ -7050,7 +7072,10 @@ MANAGED_PACKAGES = [
     {"pkg": "accelerate", "mod": "accelerate", "title": "🚀 HF Accelerate (Low-RAM Offloader)", "desc": "Manages VRAM/RAM weight offloading during Specialist Manager swaps.", "owner": "Hugging Face Inc. (Apache-2.0)"},
     {"pkg": "kokoro-onnx", "mod": "kokoro_onnx", "title": "🗣️ Kokoro-ONNX Neural TTS", "desc": "Ultra-fast ~82M offline neural voice synthesis (includes Female Voice 3 af_nicole/af_river).", "owner": "thewh1teagle & hexgrad (Apache-2.0)"},
     {"pkg": "soundfile", "mod": "soundfile", "title": "🎧 SoundFile Audio I/O", "desc": "Reads and writes neural voice & mic audio buffers.", "owner": "Bastian Bechtold (BSD-3-Clause)"},
-    {"pkg": "faster-whisper", "mod": "faster_whisper", "title": "🎤 Faster-Whisper Offline STT", "desc": "High-speed CTranslate2 offline microphone speech-to-text transcription.", "owner": "SYSTRAN (MIT License)"}
+    {"pkg": "faster-whisper", "mod": "faster_whisper", "title": "🎤 Faster-Whisper Offline STT", "desc": "High-speed CTranslate2 offline microphone speech-to-text transcription.", "owner": "SYSTRAN (MIT License)"},
+    {"pkg": "argostranslate", "mod": "argostranslate", "title": "🌐 Argos Translate (Offline Translator)", "desc": "100% offline neural machine translation (CTranslate2) stored portably in models/translate/.", "owner": "Argos Open Technologies (MIT License)"},
+    {"pkg": "pyspellchecker", "mod": "spellchecker", "title": "✨ PySpellChecker (Multi-Language)", "desc": "Offline multi-language spell checking (EN/ES/FR/DE/PT/IT/RU/AR/NL) with Lore custom-word whitelisting.", "owner": "Tyler Barrus (MIT License)"},
+    {"pkg": "langid", "mod": "langid", "title": "🧭 LangID (Offline Language Detector)", "desc": "Fast offline language identification across 97 languages for automatic spellcheck & translation.", "owner": "Marco Lui (BSD-2-Clause)"}
 ]
 
 _PKG_STATUS_CACHE = {"data": None, "ts": 0.0}
@@ -7347,6 +7372,60 @@ def api_workbench_subprocess(payload: dict):
         trust_level=trust,
     )
 
+
+def _collect_lore_whitelist_words() -> set:
+    words = set(PRIORITY_CACHE.get("domain_vocab") or set())
+    for k in (WORKSPACE_CFG.get("ai_name", ""), WORKSPACE_CFG.get("user_name", "")):
+        for tok in re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]{2,}", str(k or "")):
+            words.add(tok.lower())
+    if GLOSSARY_PATH.exists():
+        try:
+            g = json.loads(GLOSSARY_PATH.read_text(encoding="utf-8"))
+            for item in (g.get("most_repeating_words") or [])[:250]:
+                w = str(item.get("word") or "").strip().lower()
+                if len(w) >= 3:
+                    words.add(w)
+        except Exception:
+            pass
+    return words
+
+def run_lore_safe_spellcheck(text: str, lang: str = "auto") -> dict:
+    return avs_lang.spellcheck_text(text, lang=lang, custom_words=_collect_lore_whitelist_words())
+
+@app.get("/api/lang/status")
+def api_lang_status():
+    caps = avs_lang.get_language_capabilities(model_dir=MODEL_DIR, locales_dir=LOCALES_DIR)
+    caps.update({
+        "ui_language": WORKSPACE_CFG.get("ui_language", "en"),
+        "speech_locale": WORKSPACE_CFG.get("speech_locale", "en-US"),
+        "spellcheck_enabled": bool(WORKSPACE_CFG.get("spellcheck_enabled", True)),
+        "translate_bridge_mode": WORKSPACE_CFG.get("translate_bridge_mode", "native"),
+        "lore_whitelist_size": len(_collect_lore_whitelist_words()),
+    })
+    return caps
+
+@app.get("/api/lang/locale/{lang_code}")
+def api_get_locale_pack(lang_code: str):
+    return avs_lang.load_locale_pack(LOCALES_DIR, lang_code)
+
+@app.post("/api/lang/spellcheck")
+def api_lang_spellcheck(payload: dict):
+    txt = str(payload.get("text") or "")
+    lang = str(payload.get("lang") or "auto")
+    return run_lore_safe_spellcheck(txt, lang=lang)
+
+@app.post("/api/lang/translate")
+def api_lang_translate(payload: dict):
+    txt = str(payload.get("text") or "")
+    to_lang = str(payload.get("to") or WORKSPACE_CFG.get("ui_language") or "en")
+    from_lang = str(payload.get("from") or "auto")
+    return avs_lang.translate_text(txt, to_lang=to_lang, from_lang=from_lang, model_dir=MODEL_DIR)
+
+@app.post("/api/lang/install_pack")
+def api_lang_install_pack(payload: dict):
+    fc = str(payload.get("from_code") or "en")
+    tc = str(payload.get("to_code") or "es")
+    return avs_lang.install_argos_language_pair(fc, tc, model_dir=MODEL_DIR, offline_mode=bool(STATE.get("offline_mode")))
 
 @app.get("/api/hardware_specs")
 def api_hardware_specs():
@@ -9910,41 +9989,10 @@ SPECIALIST_MODEL_BAG.extend([
     }
 ])
 
-SELF_MANUAL_SECTIONS = [
-    {
-        "id": "overview",
-        "title": "1. System Map, Architecture & Folder Layout (LLM-Friendly Cheat Sheet)",
-        "body": "AetherVault Studio v6.8 Bluesky is a 100% portable, zero-footprint local AI & PC Workbench workstation.\nBOOTSTRAPPER (FROZEN ENTRY LAYER):\n- Launch.bat / Launch.sh: Cross-platform bootstrappers (Windows, macOS, Linux).\n- manager.py: Permanent Bootstrapper & Control Center (GUI + CLI) with .venv auto-setup, OTA updates & live console.\nCORE RUNTIME & MODULAR avs/ PACKAGE:\n- assistant_server.py: FastAPI + llama.cpp + Smart API Waterfall + Live Python Workbench + Telegram/Bluesky/MCP backend.\n- ui_studio.html: Single-file web UI (Desktop http://127.0.0.1:8000 | Home LAN http://<LAN_IP>:8000).\n- avs/: Modular package (platform_bridge, toolbox, workbench, hardware_monitor, contracts, memory_graph, referee, tool_registry, bridges, turn_pipeline, model_polish).\nUSER DATA FOLDERS (ALL INCLUDED IN .ZIP EXPORT/IMPORT):\n- workspace_config.json: Persona, AI/User name, theme, toggles, failsafe_model, Spotify/Telegram settings.\n- user_profile_card.json: Saved user location, ZIP, map pin (lat/lon), pinned facts & custom fields.\n- memory_core.db & memory_vault/: SQLite Memory Vault (Priority #1) + chat sessions + indexed Lore chunks.\n- pseudo_memory_index.json & glossary_index.json: Auto-updated boot index & keyword map across chats/lore.\n- priority_pdfs/: Drop PDF/TXT/MD files here (toggle each file between CORE=always loaded or LORE=on-demand RAG).\n- chat_logs/: Auto-exported .txt transcripts of all chat sessions for cross-chat recall.\n- models/: Local .gguf brains (Default: gemma-4-E4B-it-Q4_K_M.gguf). stock_vault/: Golden backups & offline wheels.\n- .temp_cache/: Auto-purged session scratchpad."
-    },
-    {
-        "id": "manager_commands",
-        "title": "2. Manager Console Commands & Subcommands (Live Debug & Injection)",
-        "body": "Type these commands directly into the command bar at the bottom of the Manager Control Center (Up/Down arrows cycle history):\n- /help : List all Manager console commands and syntax.\n- /status : Query live server state (active model, GPU/CPU offload, RAM, port, mode, trust, current step).\n- /stop : Immediately halt an active generation or repetition loop (/stop_generation).\n- /inject <category> | <fact> : Save a fact straight into Priority #1 SQLite Memory Vault + pseudo-memory.\n  Example: /inject user_note | I prefer dark synthwave while coding\n- /toggle <setting> <value> : Flip any Studio setting live via /config/update.\n  Valid settings & values:\n    workspace_mode   -> assistant | roleplay\n    workbench_trust  -> safe_auto | full_pc\n    brain_mode       -> local_only | smart_api | hybrid\n    performance_mode -> Reflex (Auto-Smart Fast) | Laptop 2015 (Fast) | Eco (Safe) | Balanced | Turbo (Max Threads)\n    theme_preset     -> aether_violet | visor_cyan | emerald_matrix | noir_crimson | synth_sunset | daylight_studio\n    auto_web_search  -> true | false\n    unrestricted_tokens -> true | false\n    osworld_enabled  -> true | false\n- /py <code> : Execute a Python snippet in the killable subprocess Workbench (/workbench/subprocess) without waking the LLM.\n  Example: /py print(2 + 2)\n- /log [keyword] [lines] : Tail error_audit.log locally (works even if the server is stopped). Example: /log Unicode 25\n- /clear : Clear the Manager console output pane.\n- /restart : Cleanly stop and relaunch assistant_server.py."
-    },
-    {
-        "id": "workbench_guide",
-        "title": "3. AI Self-Orientation & Python Workbench (vault.*) Complete Reference",
-        "body": "NOTE TO THE RUNNING AI MODEL: If you are ever unsure how your tools work, call vault.help() or vault.manual() inside a ```workbench block!\nWEB, NEWS & MEDIA:\n- vault.web('keywords') / vault.news('topic') / vault.ddgs('topic'): 5-tier zero-key search (Google News RSS + DDGS + DDG Lite + Wikipedia).\n- vault.fetch_url('https://...'): Clean article/webpage text reader (strips scripts & navbars).\n- vault.youtube('query', private=True) / vault.browser(url='...', search='...', private=True): Silent browser & YouTube search.\n- vault.weather() : Live Open-Meteo weather & 2-day forecast using the user's saved card/map pin.\n- vault.spotify('current_track'|'playlists'|'play_playlist'|'play_album'|'liked'|'play_liked'|'like'|'play'|'pause'|'next'|'prev', 'query')\nPC, FILES, SYSTEM & UTILITIES:\n- vault.pc_info() | vault.disk_usage() | vault.ps_list(20) | vault.debug_log('keyword') | vault.pip_list()\n- vault.files('steam'|'C:/path'|'keyword') | vault.read_file(path) | vault.chunk_read(path, chunk_index=0, chunk_size=10000)\n- vault.write_desktop('file.txt', 'text') | vault.write_file(path, text) | vault.open_app('steam'|'notepad')\n- vault.clipboard('read'|'write', text) | vault.notify(title, msg) | vault.timer(seconds, msg)\n- vault.run_cmd('powershell') [Requires workbench_trust='full_pc'] | vault.run_isolated(code, timeout=15)\nMEMORY, STUDIO & SELF-TEST:\n- vault.profile() | vault.update_profile(...) | vault.memory_save(cat, fact) | vault.forget(id_or_keyword)\n- vault.toggle(setting, value) | vault.settings() | vault.knowledge_list() | vault.lore('keywords')\n- vault.test_all(include_active=False) | vault.test_step('tool') : Step-by-step Tool Gauntlet.\n- vault.propose_core_fix(target_file, find_snippet, replace_snippet, reason) : Stage syntax-checked Self-Heal patch for human approval."
-    },
-    {
-        "id": "models_hardware",
-        "title": "4. Models, Gemma-4-E4B-it Default & Legacy 2015 Laptop Tuning",
-        "body": "DEFAULT OFFLINE BRAIN: gemma-4-E4B-it-Q4_K_M.gguf (~5.0 GB, Apache-2.0). Chosen as default because Gemma 4 natively excels at multi-step Python Workbench tool calling, roleplay continuity, and fast local inference.\nPINNING DEFAULT / FAILSAFE MODEL: Set 'last_loaded_model' and 'failsafe_model' in workspace_config.json.\nBRAIN MODES:\n- local_only: 100% offline local GGUF via llama-cpp-python.\n- smart_api: Prioritized BYOK cloud API waterfall (Gemini, HF Router, Groq, OpenRouter, DeepSeek, Mistral, OpenAI, Custom LAN).\n- hybrid: Uses Smart API waterfall first, automatically drops to your local failsafe GGUF if offline or rate-limited.\nLEGACY HARDWARE / 2015 LAPTOP GUIDE:\n- If an older AMD/Intel iGPU throws a Vulkan access violation, AetherVault auto-heals to Safe CPU Mode.\n- Use Manager Option [6] -> Safe CPU Build, pick a 1.5B-3B model (e.g., Gemma-4-E2B or Qwen2.5-1.5B), and set Governor to 'Laptop 2015 (Fast)'."
-    },
-    {
-        "id": "errors_selfheal",
-        "title": "5. Error Code Dictionary (ERR-01 to ERR-10) & Anti-Ouroboros Self-Heal",
-        "body": "PREDETERMINED ERROR CODES:\n- ERR-01: No local GGUF loaded -> Select a .gguf in sidebar or download one in Manager Option [3].\n- ERR-02: Model still loading -> Wait for top bar to show model name.\n- ERR-03: Context overflow -> Auto-healed by compacting older turns while preserving recent continuity.\n- ERR-04: Repetition/Delirium loop -> Watchdog auto-cut the loop cleanly.\n- ERR-05: Stopped by user -> Partial reply saved cleanly.\n- ERR-06: Web Search hiccup -> Auto-switched across 5 tiers (Google News RSS / DDGS / DDG Lite / Instant Answer / Wikipedia).\n- ERR-07: Spotify device/OAuth issue -> Auto-fell back to Windows URI / hardware media keys.\n- ERR-08: Image generator unreachable -> Start local SD WebUI (--api) or disable Offline Mode.\n- ERR-09: OSWorld failsafe -> Keep mouse away from top-left corner and verify pyautogui is installed.\n- ERR-10: Inference engine hiccup -> Caught safely; run /log in Manager console to inspect.\nANTI-OUROBOROS SELF-HEAL: Protected core files (assistant_server.py, ui_studio.html) cannot be directly overwritten by the AI. The AI submits a syntax-checked diff via vault.propose_core_fix(); you review & approve it in Diagnostics -> Self-Heal, and a Golden Backup is saved automatically."
-    },
-    {
-        "id": "mcp_portable",
-        "title": "6. MCP Server, LAN / Phone Access & Portable .ZIP Migration",
-        "body": "MCP SERVER (/mcp): JSON-RPC 2.0 endpoint exposing aethervault_status, aethervault_vault_search, aethervault_chat_search, aethervault_file_helper, and aethervault_media_helper. Optional Bearer/X-MCP-Token auth via mcp_auth_token.\nHOME WI-FI / PHONE ACCESS: Open http://<LAN_IP>:8000 on any device on your local Wi-Fi (external internet IPs are blocked by lan_guard).\nPORTABLE .ZIP EXPORT & IMPORT: Exporting creates a single .zip containing your SQLite DB, workspace_config.json, user_profile_card.json, pseudo_memory_index.json, glossary_index.json, partner_evolution.json, /priority_pdfs, /memory_vault, /chat_logs, /custom_assets (avatars/wallpapers), and generated media. Importing into a newer AetherVault Studio release rolls over 100% of your custom persona, memories, themes, and chats."
-    }
-]
+SELF_MANUAL_SECTIONS = avs_manual.MANUAL_SECTIONS_EN
 
 def index_self_manual_on_boot():
-    """Indexes the embedded manual + AetherVault_Studio_Manual.pdf into PRIORITY_CACHE['self_manual_text']."""
+    """Indexes the embedded visual manual + AetherVault_Studio_Manual.pdf into PRIORITY_CACHE['self_manual_text']."""
     sections = [f"### {s['title']}\n{s['body']}" for s in SELF_MANUAL_SECTIONS]
     if MANUAL_PDF_PATH.exists():
         try:
@@ -9961,10 +10009,11 @@ def search_self_manual(query: str = "") -> str:
     if not PRIORITY_CACHE.get("self_manual_text"):
         index_self_manual_on_boot()
     q = (query or "").strip().lower()
+    active_secs = avs_manual.get_manual_sections(WORKSPACE_CFG.get("ui_language", "en"))
     if not q:
-        return "\n\n".join([f"### {s['title']}\n{s['body']}" for s in SELF_MANUAL_SECTIONS])
+        return "\n\n".join([f"### {s['title']}\n{s['body']}" for s in active_secs])
     scored = []
-    for s in SELF_MANUAL_SECTIONS:
+    for s in active_secs:
         txt = f"{s['title']}\n{s['body']}"
         hits = sum(1 for w in q.split() if len(w) >= 3 and w in txt.lower())
         scored.append((hits, txt))
@@ -9972,15 +10021,17 @@ def search_self_manual(query: str = "") -> str:
     return f"=== AETHERVAULT v{APP_VERSION} BUILT-IN MANUAL REFERENCE ===\n" + "\n\n".join([t for _, t in scored[:3]])
 
 @app.get("/manual/content")
-def api_get_manual_content():
+def api_get_manual_content(lang: str = ""):
     if not PRIORITY_CACHE.get("self_manual_text"):
         index_self_manual_on_boot()
+    use_lang = (lang or WORKSPACE_CFG.get("ui_language") or "en").strip().lower()[:2]
     return {
         "ok": True,
         "version": APP_VERSION,
+        "lang": use_lang,
         "pdf_available": MANUAL_PDF_PATH.exists(),
         "pdf_url": "/manual/pdf" if MANUAL_PDF_PATH.exists() else None,
-        "sections": SELF_MANUAL_SECTIONS
+        "sections": avs_manual.get_manual_sections(use_lang)
     }
 
 @app.get("/manual/pdf")

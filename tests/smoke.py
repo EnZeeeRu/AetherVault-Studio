@@ -34,10 +34,13 @@ def main() -> int:
     print("[PASS 2/7] Zero deprecated files or stale references found.")
 
     # 3. Import & unit-test every modular avs/ component
+    import xml.etree.ElementTree as ET
     from avs import (
         bridges,
         contracts,
         hardware_monitor,
+        language_tools,
+        manual_assets,
         memory_graph,
         model_polish,
         platform_bridge,
@@ -82,7 +85,26 @@ def main() -> int:
     assert model_polish.classify_model_family("dolphin-3.0-8b") == "expressive_chat"
     assert referee.is_abrupt_reply("This is a longer sentence that cuts off abruptly with")
     assert "specs" in hardware_monitor.get_full_hardware_report()
-    print("[PASS 3/7] All 11 modular avs/ components imported and verified.")
+
+    # Language tools, offline lore-safe spellcheck & locale packs
+    assert language_tools.detect_language("¿Qué clima hace hoy en Posadas?") == "es"
+    assert language_tools.detect_language("What is the weather like today?") == "en"
+    sc_res = language_tools.spellcheck_text("teh AetherVault lore with Zyrkathia", lang="en", custom_words=["zyrkathia"])
+    assert sc_res["ok"] and "the AetherVault lore with Zyrkathia" == sc_res["corrected"]
+    en_loc = language_tools.load_locale_pack(ROOT / "locales", "en")
+    es_loc = language_tools.load_locale_pack(ROOT / "locales", "es")
+    assert en_loc.get("meta", {}).get("code") == "en" and es_loc.get("meta", {}).get("code") == "es"
+    assert en_loc.get("ui", {}).get("btn_send") and es_loc.get("ui", {}).get("btn_send")
+
+    # Visual manual assets (10 EN + 10 ES + valid XML SVGs) & logo SVG
+    assert len(manual_assets.get_manual_sections("en")) == 10
+    assert len(manual_assets.get_manual_sections("es")) == 10
+    for sec in manual_assets.get_manual_sections("en"):
+        if sec.get("svg"):
+            ET.fromstring(sec["svg"])
+    ET.fromstring((ROOT / "aethervault_logo.svg").read_text(encoding="utf-8"))
+    assert (ROOT / "AetherVault_Studio_Manual.pdf").read_bytes().startswith(b"%PDF-")
+    print("[PASS 3/7] All 13 modular avs/ components, locales, SVG manual diagrams & PDF verified.")
 
     # 4. Verify isolated subprocess Workbench execution + Safe Auto gate
     wb_ok = workbench.run_workbench_subprocess("print(6 * 7)", ROOT / ".temp_cache", port=8000, token="smoke", timeout_sec=10, trust_level="safe_auto")
@@ -102,7 +124,11 @@ def main() -> int:
     # 6. Verify ui_studio.html integrity
     ui_txt = (ROOT / "ui_studio.html").read_text(encoding="utf-8")
     assert "<!DOCTYPE html>" in ui_txt and "</html>" in ui_txt
-    for dom_id in ("cfg-bsky-handle", "cfg-bsky-pass", "cfg-bsky-enabled", "cfg-tg-token", "cfg-sp-id"):
+    for dom_id in (
+        "cfg-bsky-handle", "cfg-bsky-pass", "cfg-bsky-enabled", "cfg-tg-token", "cfg-sp-id",
+        "quick-lang-select", "spellcheck-btn", "spellcheck-bar", "cfg-ui-lang", "cfg-speech-locale",
+        "cfg-translate-bridge", "cfg-spellcheck-enabled", "cfg-argos-from", "cfg-argos-to", "manual-toc-bar"
+    ):
         assert f'id="{dom_id}"' in ui_txt, f"Missing UI DOM element: {dom_id}"
     print("[PASS 6/7] ui_studio.html DOM & structure verified.")
 
