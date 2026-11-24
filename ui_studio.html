@@ -408,8 +408,14 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+    flex-wrap: wrap;
     margin-bottom: 8px;
     gap: 6px;
+  }
+  #control-sidebar select,
+  #control-sidebar input {
+    min-width: 0;
+    max-width: 100%;
   }
   h3 {
     margin: 0;
@@ -998,6 +1004,46 @@
     border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
     color: var(--accent-soft);
   }
+  .uc-pinned-box {
+    margin-top: 7px;
+    padding: 6px 8px;
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--bg) 88%, var(--panel));
+    border: 1px solid var(--border);
+  }
+  .uc-pinned-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--accent-soft);
+    margin-bottom: 3px;
+  }
+  .uc-pinned-cycle-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: #9ca3af;
+    border-radius: 5px;
+    padding: 1px 6px;
+    font-size: 0.65rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .uc-pinned-cycle-btn:hover {
+    color: #fff;
+    border-color: var(--accent);
+  }
+  .uc-pinned-text {
+    font-size: 0.72rem;
+    color: #d1d5db;
+    line-height: 1.35;
+    word-break: break-word;
+    transition: opacity 0.2s ease;
+  }
   #user-card-map {
     width: 100%;
     height: 235px;
@@ -1274,7 +1320,7 @@
     <div style="margin-top:8px; padding-top:8px; border-top:1px dashed var(--border);">
       <div style="font-size:0.72rem; color:var(--accent-soft); font-weight:600; margin-bottom:4px;">🏪 Specialist Managers (Image & Music Swap)</div>
       <div style="display:flex; gap:4px;">
-        <select id="specialist-select" style="flex:1; font-size:0.74rem; padding:5px;">
+        <select id="specialist-select" style="flex:1; min-width:0; max-width:100%; text-overflow:ellipsis; font-size:0.74rem; padding:5px;">
           <option value="">🎨/🎵 Optional HF Specialist Models...</option>
         </select>
         <button class="secondary small-btn" onclick="downloadSpecialistModel()" title="Download Specialist Model into /models/image or /models/music">⬇️ Get</button>
@@ -1295,15 +1341,24 @@
         <button class="secondary small-btn" onclick="openUserCardInSettings(false)" title="Edit User Card, Custom Fields & Persona Settings">✏️ Edit</button>
       </div>
     </div>
-    <div style="display:flex; justify-content:space-between; align-items:center; gap:6px; font-size:0.8rem;">
-      <span><b id="sb-uc-name" style="color:#fff;">Creator</b></span>
-      <span class="uc-pill" id="sb-uc-pin-badge">📍 No map pin</span>
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:6px; font-size:0.8rem; flex-wrap:wrap;">
+      <span><span style="color:#9ca3af; font-size:0.71rem;">Handle:</span> <b id="sb-uc-name" style="color:#fff;">Creator</b></span>
+      <span class="uc-pill" id="sb-uc-pin-badge">📍 Map Pin: None</span>
     </div>
     <div id="backend-profile-strip" style="font-size:0.73rem; color:#a7f3d0; margin-top:4px; line-height:1.35;">
-      📍 Location not set — click <b>Map Pin</b> or mention your city in chat.
+      📍 <b>Location:</b> Not set — click <b>Map Pin</b> or mention your city in chat.
     </div>
-    <div class="uc-meta-row" id="sb-uc-fields"></div>
-    <div id="sb-uc-facts" style="font-size:0.7rem; color:#9ca3af; margin-top:5px; line-height:1.35;"></div>
+    <div id="sb-uc-fields-wrap" style="display:none; margin-top:6px;">
+      <div style="font-size:0.67rem; font-weight:700; text-transform:uppercase; letter-spacing:0.4px; color:#9ca3af; margin-bottom:2px;">🏷️ Custom Fields</div>
+      <div class="uc-meta-row" id="sb-uc-fields" style="margin-top:0;"></div>
+    </div>
+    <div class="uc-pinned-box" id="sb-uc-facts-wrap" style="display:none;">
+      <div class="uc-pinned-head">
+        <span id="sb-uc-facts-title">📌 Pinned Facts (1/1)</span>
+        <button class="uc-pinned-cycle-btn" id="sb-uc-facts-next" onclick="cycleSidebarPinnedFact(1)" title="Show next pinned fact">↻ Next</button>
+      </div>
+      <div class="uc-pinned-text" id="sb-uc-facts"></div>
+    </div>
   </div>
 
   <div class="card">
@@ -2212,6 +2267,67 @@ async function setWorkbenchTrust(trust) {
 let userCardMap = null;
 let userCardMarker = null;
 
+window.sbPinnedFactsList = [];
+window.sbPinnedFactIdx = 0;
+window.sbPinnedHoverPaused = false;
+window.sbPinnedIntervalStarted = false;
+
+function paintSidebarPinnedFact() {
+  const wrapEl = document.getElementById('sb-uc-facts-wrap');
+  const titleEl = document.getElementById('sb-uc-facts-title');
+  const textEl = document.getElementById('sb-uc-facts');
+  const nextBtn = document.getElementById('sb-uc-facts-next');
+  if (!wrapEl || !textEl) return;
+
+  const list = Array.isArray(window.sbPinnedFactsList) ? window.sbPinnedFactsList : [];
+  if (!list.length) {
+    wrapEl.style.display = 'none';
+    textEl.innerText = '';
+    return;
+  }
+  wrapEl.style.display = 'block';
+  if (window.sbPinnedFactIdx >= list.length || window.sbPinnedFactIdx < 0) {
+    window.sbPinnedFactIdx = 0;
+  }
+  const idx = window.sbPinnedFactIdx;
+  if (titleEl) {
+    titleEl.innerText = list.length > 1
+      ? `📌 Pinned Facts (${idx + 1}/${list.length})`
+      : '📌 Pinned Fact';
+  }
+  if (nextBtn) {
+    nextBtn.style.display = list.length > 1 ? 'inline-block' : 'none';
+  }
+  textEl.innerText = String(list[idx]);
+}
+
+function cycleSidebarPinnedFact(step = 1) {
+  const list = Array.isArray(window.sbPinnedFactsList) ? window.sbPinnedFactsList : [];
+  if (list.length <= 1) return;
+  const textEl = document.getElementById('sb-uc-facts');
+  if (textEl) textEl.style.opacity = '0.25';
+  setTimeout(() => {
+    window.sbPinnedFactIdx = (window.sbPinnedFactIdx + step + list.length) % list.length;
+    paintSidebarPinnedFact();
+    if (textEl) textEl.style.opacity = '1';
+  }, 140);
+}
+
+function ensureSidebarPinnedFactsRotator() {
+  if (window.sbPinnedIntervalStarted) return;
+  window.sbPinnedIntervalStarted = true;
+  const wrapEl = document.getElementById('sb-uc-facts-wrap');
+  if (wrapEl) {
+    wrapEl.addEventListener('mouseenter', () => { window.sbPinnedHoverPaused = true; });
+    wrapEl.addEventListener('mouseleave', () => { window.sbPinnedHoverPaused = false; });
+  }
+  setInterval(() => {
+    if (!window.sbPinnedHoverPaused && Array.isArray(window.sbPinnedFactsList) && window.sbPinnedFactsList.length > 1) {
+      cycleSidebarPinnedFact(1);
+    }
+  }, 12000);
+}
+
 function renderSidebarUserCard(prof) {
   const p = prof || {};
   const nameEl = document.getElementById('sb-uc-name');
@@ -2222,37 +2338,40 @@ function renderSidebarUserCard(prof) {
   if (pinBadge) {
     if (hasPin) {
       pinBadge.className = 'uc-pill uc-pin-ok';
-      pinBadge.innerText = `📌 ${Number(p.latitude).toFixed(2)}, ${Number(p.longitude).toFixed(2)}`;
+      pinBadge.innerText = `📍 Map Pin: ${Number(p.latitude).toFixed(2)}, ${Number(p.longitude).toFixed(2)}`;
     } else {
       pinBadge.className = 'uc-pill';
-      pinBadge.innerText = '📍 No map pin';
+      pinBadge.innerText = '📍 Map Pin: None';
     }
   }
 
   const pStrip = document.getElementById('backend-profile-strip');
   if (pStrip) {
     if (p.location) {
-      pStrip.innerHTML = `📍 <b>${escapeHtml(p.location)}</b>${p.zip_code ? ' <span style="color:#9ca3af;">(' + escapeHtml(p.zip_code) + ')</span>' : ''}`;
+      pStrip.innerHTML = `📍 <b>Location:</b> ${escapeHtml(p.location)}${p.zip_code ? ' <span style="color:#9ca3af;">(ZIP: ' + escapeHtml(p.zip_code) + ')</span>' : ''}`;
     } else {
-      pStrip.innerHTML = '📍 Location not set — click <b>Map Pin</b> or mention your city in chat.';
+      pStrip.innerHTML = '📍 <b>Location:</b> Not set — click <b>Map Pin</b> or mention your city in chat.';
     }
   }
 
+  const fieldsWrap = document.getElementById('sb-uc-fields-wrap');
   const fieldsEl = document.getElementById('sb-uc-fields');
   if (fieldsEl) {
     const cf = (p.custom_fields && typeof p.custom_fields === 'object') ? Object.entries(p.custom_fields) : [];
+    if (fieldsWrap) fieldsWrap.style.display = cf.length ? 'block' : 'none';
     fieldsEl.innerHTML = cf.slice(0, 6).map(([k, v]) =>
       `<span class="uc-pill uc-field" title="${escapeHtml(k)}: ${escapeHtml(v)}">${escapeHtml(k)}: ${escapeHtml(String(v).slice(0, 22))}</span>`
     ).join('');
   }
 
-  const factsEl = document.getElementById('sb-uc-facts');
-  if (factsEl) {
-    const pf = Array.isArray(p.pinned_facts) ? p.pinned_facts : [];
-    factsEl.innerHTML = pf.length
-      ? `📌 ${pf.slice(-2).map(f => escapeHtml(String(f).slice(0, 58))).join(' • ')}`
-      : '';
+  const pf = Array.isArray(p.pinned_facts) ? p.pinned_facts.filter(x => String(x || '').trim()) : [];
+  const changed = JSON.stringify(pf) !== JSON.stringify(window.sbPinnedFactsList);
+  window.sbPinnedFactsList = pf;
+  if (changed && window.sbPinnedFactIdx >= pf.length) {
+    window.sbPinnedFactIdx = Math.max(0, pf.length - 1);
   }
+  ensureSidebarPinnedFactsRotator();
+  paintSidebarPinnedFact();
 }
 
 function openUserCardInSettings(focusMap = false) {
