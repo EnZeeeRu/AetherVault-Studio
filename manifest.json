@@ -8,11 +8,12 @@
     "manager.py"
   ],
   "files": {
+    ".gitattributes": "6f8ec8540011d839259c57087bc12ecd1603c54274b3ff384f7647f7e86d00a6",
     "Launch.bat": "875335adee3f1e1ff5949cc4d926013a7324681f6efc9e0e4190945dff0833a5",
     "Launch.sh": "e1fd0734f10ab4114e6d699056d465cb88cbea78e38a8f434eb6387398bc50c8",
-    "manager.py": "3e417d30f32c29b2e5599f4a3195a06979cd42548bc4fdd5a1db60bb59f9a91c",
-    "assistant_server.py": "842626bb3e2694553993b00a8e49ba4e225f0b73a9ecabe44ea6e051c023ac81",
-    "ui_studio.html": "01fbe09c333e7ce76f7e4a42e297bf5c3e9d98ccdacf7e925f0c634e4b3c680a",
+    "manager.py": "d2d8446fd2811c7fd54ef45857885a52a076d3040f16591577d006f87ba8f613",
+    "assistant_server.py": "d872f9919efcacd6f7a8366238806c034a01565e0191ec88f09c10c46c8eb0e1",
+    "ui_studio.html": "a462746bb6ac701fc328b3355d7424096d1214d985deaf7763542f7f16a62c2a",
     "aethervault_logo.svg": "83252944100dff39d7b1e7a2347c1badbb839d5faf7d6d21c90d895210df322c",
     "AetherVault_Studio_Manual.pdf": "563643f74ee2e927525717dbd4126ca1696c2daa60129bbf8075c176662ccd6c",
     "locales/en.json": "e4411a6c0e0d55b49902efeb5dacd9b908240689b5a3cd2edb8e4b102f0616c0",
@@ -32,6 +33,6 @@
     "avs/language_tools.py": "bae76acedb95af2cbc1be77783f2b83fe46a8a58814e8c69442c0bc21421e484",
     "avs/manual_assets.py": "07eddf34f64d1fa687412a4cb72a9245778cadb8d3583da8440f638a5f47e89f",
     "custom_tools/README.md": "b42bb5d429635ffd212ee2097f2ba1ae566d3db19b9749a6a751b44893f11291",
-    "tests/smoke.py": "9a2ed18f5b03b318586cb8a11483b0daa0bb5e19801b19115964fec1ebe148c3"
+    "tests/smoke.py": "4c4919b3d51cee28095cab00f91a2f18dcde33e0625624faac55d5a282390084"
   }
 }

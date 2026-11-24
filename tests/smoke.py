@@ -119,7 +119,15 @@ def main() -> int:
     assert rt_ver and rt_ver != "unhydrated", f"Unexpected runtime version: {rt_ver}"
     assert manager.get_configured_github_repo(), "GitHub repo default should be non-empty"
     assert {"Launch.bat", "Launch.sh", "manager.py"} == manager.FROZEN_BOOTSTRAP_FILES
-    print(f"[PASS 5/7] Bootstrapper (manager.py) verified (detected runtime v{rt_ver}).")
+    # Verify CRLF-tolerant Git blob SHA-1 matcher & Python syntax gate
+    lf_sample = b"print('ok')\n"
+    crlf_sample = b"print('ok')\r\n"
+    lf_blob_sha = manager._git_blob_sha1(lf_sample)
+    assert manager._matches_git_blob_sha(crlf_sample, lf_blob_sha, "avs/test.py")
+    assert manager._verify_python_bytes(b"x = 1 + 2\n", "ok.py")[0]
+    assert not manager._verify_python_bytes(b"def broken(:\n", "bad.py")[0]
+    assert (ROOT / ".gitattributes").exists(), "Missing .gitattributes"
+    print(f"[PASS 5/7] Bootstrapper (manager.py) + Commit-Pinned Tree Sync & Syntax Gate verified (runtime v{rt_ver}).")
 
     # 6. Verify ui_studio.html integrity
     ui_txt = (ROOT / "ui_studio.html").read_text(encoding="utf-8")

@@ -14,9 +14,11 @@ import threading
 import zipfile
 import platform
 import hashlib
+import ast
 import py_compile
 import subprocess
 import webbrowser
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -475,65 +477,267 @@ def set_configured_github_repo(repo_slug: str, log_fn=print):
     log_fn(f"[GITHUB] Linked repository -> '{slug or '(none)'}'")
 
 
+OTA_TEXT_EXTS = {".py", ".html", ".json", ".md", ".svg", ".sh", ".bat", ".txt", ".gitattributes"}
+OTA_ROOT_FILES = {
+    "assistant_server.py", "ui_studio.html", "aethervault_logo.svg",
+    "AetherVault_Studio_Manual.pdf", "README.md", "manifest.json",
+    ".gitattributes", "Launch.bat", "Launch.sh", "manager.py"
+}
+OTA_MANAGED_PREFIXES = ("avs/", "locales/", "tests/")
+
+
+def _is_managed_ota_path(rel_path: str) -> bool:
+    norm = str(rel_path or "").replace("\\", "/").lstrip("/")
+    if not norm or ".." in norm or ":" in norm:
+        return False
+    if norm in OTA_ROOT_FILES or norm == "custom_tools/README.md":
+        return True
+    return any(norm.startswith(pref) for pref in OTA_MANAGED_PREFIXES)
+
+
+def _git_blob_sha1(data: bytes) -> str:
+    return hashlib.sha1(f"blob {len(data)}\0".encode("ascii") + data).hexdigest()
+
+
+def _matches_git_blob_sha(data: bytes, expected_sha: str, rel_path: str) -> bool:
+    if not expected_sha:
+        return True
+    if _git_blob_sha1(data) == expected_sha:
+        return True
+    ext = Path(rel_path).suffix.lower() or Path(rel_path).name.lower()
+    if ext in OTA_TEXT_EXTS:
+        lf_data = data.replace(b"\r\n", b"\n")
+        if _git_blob_sha1(lf_data) == expected_sha:
+            return True
+    return False
+
+
+def _matches_sha256_tolerant(data: bytes, expected_sha: str, rel_path: str) -> bool:
+    if not expected_sha:
+        return True
+    if hashlib.sha256(data).hexdigest() == expected_sha:
+        return True
+    ext = Path(rel_path).suffix.lower() or Path(rel_path).name.lower()
+    if ext in OTA_TEXT_EXTS:
+        lf_data = data.replace(b"\r\n", b"\n")
+        if hashlib.sha256(lf_data).hexdigest() == expected_sha:
+            return True
+    return False
+
+
+def _verify_python_bytes(raw_bytes: bytes, rel_path: str) -> tuple:
+    if not rel_path.endswith(".py"):
+        return True, ""
+    try:
+        src = raw_bytes.decode("utf-8")
+        ast.parse(src, filename=rel_path)
+        compile(src, rel_path, "exec")
+        return True, ""
+    except Exception as e:
+        return False, f"Python syntax gate rejected {rel_path}: {e}"
+
+
+def _get_optional_github_token() -> str:
+    env_tok = os.environ.get("AVS_GITHUB_TOKEN", "").strip()
+    if env_tok:
+        return env_tok
+    cfg_p = ROOT_DIR / "workspace_config.json"
+    if cfg_p.exists():
+        try:
+            return str(json.loads(cfg_p.read_text(encoding="utf-8")).get("github_token") or "").strip()
+        except Exception:
+            pass
+    return ""
+
+
+def _write_bytes_atomic(dest: Path, raw_bytes: bytes):
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".ota_tmp")
+    tmp.write_bytes(raw_bytes)
+    tmp.replace(dest)
+
+
 def sync_from_github_ota(repo_slug: str = "", log_fn=print, include_bootstrap: bool = False) -> bool:
     """
-    Bootstrapper OTA Updater & Auto-Hydrator:
-    Fetches manifest.json from GitHub, verifies SHA-256 checksums, snapshots runtime files
-    to stock_vault, and updates runtime files WITHOUT overwriting frozen bootstrapper files
-    (unless missing) or touching user data!
+    Bootstrapper OTA Updater & Auto-Hydrator (Commit-Pinned GitHub Tree Sync + ETag 304 + Syntax Gate):
+    1. Primary: Queries GitHub's public Commits + Git Trees API (zero API token required; optional PAT supported)
+       with If-None-Match ETag caching, compares CRLF-tolerant Git blob SHAs, downloads changed files pinned to
+       the exact commit SHA (zero CDN lag), syntax-checks .py files, and writes atomically.
+    2. Fallback: If api.github.com is rate-limited or unreachable, falls back to manifest.json with
+       CRLF-tolerant SHA-256 verification and the same Python syntax gate.
+    Never overwrites frozen bootstrapper files (unless missing) or user data!
     """
     global APP_VERSION
     slug = (repo_slug or get_configured_github_repo()).strip().strip("/")
     if not slug or "/" not in slug:
         log_fn("[OTA] No GitHub repo configured. Run: /repo <username>/AetherVault-Studio")
         return False
-    base_raw = f"https://raw.githubusercontent.com/{slug}/main"
-    bust = int(time.time())
-    ota_headers = {
+
+    api_base = os.environ.get("AVS_GITHUB_API_BASE", "https://api.github.com").rstrip("/")
+    raw_base = os.environ.get("AVS_GITHUB_RAW_BASE", "https://raw.githubusercontent.com").rstrip("/")
+    gh_token = _get_optional_github_token()
+    api_headers = {
+        "User-Agent": f"AetherVaultStudio-Bootstrapper/{APP_VERSION}",
+        "Accept": "application/vnd.github+json",
+    }
+    raw_headers = {
         "User-Agent": f"AetherVaultStudio-Bootstrapper/{APP_VERSION}",
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
     }
-    manifest_url = f"{base_raw}/manifest.json?t={bust}"
-    log_fn(f"[OTA] Checking {base_raw}/manifest.json ...")
+    if gh_token:
+        api_headers["Authorization"] = f"Bearer {gh_token}"
+        raw_headers["Authorization"] = f"Bearer {gh_token}"
+
+    STOCK_VAULT.mkdir(parents=True, exist_ok=True)
+    ota_state_path = STOCK_VAULT / "ota_state.json"
+    ota_state = {}
+    if ota_state_path.exists():
+        try:
+            ota_state = json.loads(ota_state_path.read_text(encoding="utf-8"))
+        except Exception:
+            ota_state = {}
+
+    all_required_present = all((ROOT_DIR / rel).exists() for rel in REQUIRED_RUNTIME_FILES)
+
+    # --- PRIMARY PATH: GitHub Commit-Pinned Tree Sync ---
+    tree_err = None
     try:
-        req = urllib.request.Request(manifest_url, headers=ota_headers)
+        commit_url = f"{api_base}/repos/{slug}/commits/main"
+        c_headers = dict(api_headers)
+        if all_required_present and ota_state.get("repo") == slug and ota_state.get("etag"):
+            c_headers["If-None-Match"] = ota_state["etag"]
+        log_fn(f"[OTA] Checking {slug}@main via GitHub Tree Sync...")
+        c_req = urllib.request.Request(commit_url, headers=c_headers)
+        try:
+            with urllib.request.urlopen(c_req, timeout=15) as c_resp:
+                commit_data = json.loads(c_resp.read().decode("utf-8"))
+                new_etag = c_resp.headers.get("ETag") or ""
+        except urllib.error.HTTPError as he:
+            if he.code == 304 and all_required_present:
+                short_c = str(ota_state.get("commit_sha") or "")[:7] or "main"
+                log_fn(f"[OTA OK] Already up to date with {slug} ({short_c} • 304 Not Modified, 0 API quota used).")
+                return True
+            raise
+
+        commit_sha = str(commit_data.get("sha") or "").strip()
+        tree_sha = str(((commit_data.get("commit") or {}).get("tree") or {}).get("sha") or commit_sha).strip()
+        commit_date = str(((commit_data.get("commit") or {}).get("committer") or {}).get("date") or "").strip()
+        if not commit_sha or not tree_sha:
+            raise RuntimeError("Incomplete commit response from GitHub API")
+
+        tree_url = f"{api_base}/repos/{slug}/git/trees/{tree_sha}?recursive=1"
+        t_req = urllib.request.Request(tree_url, headers=api_headers)
+        with urllib.request.urlopen(t_req, timeout=20) as t_resp:
+            tree_payload = json.loads(t_resp.read().decode("utf-8"))
+
+        blobs = [
+            it for it in (tree_payload.get("tree") or [])
+            if it.get("type") == "blob" and _is_managed_ota_path(it.get("path") or "")
+        ]
+        if not blobs:
+            raise RuntimeError("GitHub tree returned 0 managed runtime blobs")
+
+        updated = 0
+        warn_count = 0
+        for item in blobs:
+            rel_path = str(item["path"]).replace("\\", "/").lstrip("/")
+            remote_blob_sha = str(item.get("sha") or "").strip()
+            dest = (ROOT_DIR / rel_path).resolve()
+            if ROOT_DIR.resolve() not in dest.parents and dest != ROOT_DIR.resolve():
+                continue
+            if rel_path in FROZEN_BOOTSTRAP_FILES and dest.exists() and not include_bootstrap:
+                continue
+            if dest.exists() and _matches_git_blob_sha(dest.read_bytes(), remote_blob_sha, rel_path):
+                continue
+
+            file_url = f"{raw_base}/{slug}/{commit_sha}/{rel_path}"
+            try:
+                f_req = urllib.request.Request(file_url, headers=raw_headers)
+                with urllib.request.urlopen(f_req, timeout=25) as f_resp:
+                    raw_bytes = f_resp.read()
+                if remote_blob_sha and not _matches_git_blob_sha(raw_bytes, remote_blob_sha, rel_path):
+                    warn_count += 1
+                    log_fn(f"[OTA WARN] Blob integrity check failed for {rel_path} — skipped!")
+                    continue
+                ok_py, py_err = _verify_python_bytes(raw_bytes, rel_path)
+                if not ok_py:
+                    warn_count += 1
+                    log_fn(f"[OTA WARN] {py_err} — skipped!")
+                    continue
+                if dest.exists() and dest.parent == ROOT_DIR and dest.name in ("assistant_server.py", "ui_studio.html"):
+                    shutil.copy2(dest, STOCK_VAULT / f"{dest.name}.good")
+                _write_bytes_atomic(dest, raw_bytes)
+                updated += 1
+                log_fn(f"[OTA] Synced {rel_path} ({len(raw_bytes):,} bytes @ {commit_sha[:7]})")
+            except Exception as fe:
+                warn_count += 1
+                log_fn(f"[OTA WARN] Failed to download {rel_path}: {fe}")
+
+        if warn_count == 0:
+            try:
+                ota_state_path.write_text(json.dumps({
+                    "repo": slug,
+                    "commit_sha": commit_sha,
+                    "etag": new_etag,
+                    "commit_date": commit_date,
+                    "synced_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                }, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+        APP_VERSION = detect_runtime_version()
+        if warn_count:
+            log_fn(f"[OTA PARTIAL] Synced {updated} file(s) with {warn_count} warning(s) from {slug}@{commit_sha[:7]} (Runtime v{APP_VERSION}).")
+        else:
+            log_fn(f"[OTA OK] Sync complete from {slug}@{commit_sha[:7]} (Runtime v{APP_VERSION} | {updated} file(s) updated).")
+        return warn_count == 0
+    except Exception as e:
+        tree_err = e
+        log_fn(f"[OTA FALLBACK] GitHub Tree API unavailable ({e}) -> trying CRLF-safe manifest.json fallback...")
+
+    # --- FALLBACK PATH: manifest.json (CRLF-tolerant SHA-256 + Python syntax gate) ---
+    base_raw = f"{raw_base}/{slug}/main"
+    bust = int(time.time())
+    manifest_url = f"{base_raw}/manifest.json?t={bust}"
+    try:
+        req = urllib.request.Request(manifest_url, headers=raw_headers)
         with urllib.request.urlopen(req, timeout=15) as resp:
             manifest_raw = resp.read()
             manifest = json.loads(manifest_raw.decode("utf-8"))
     except Exception as e:
-        log_fn(f"[OTA ERROR] Could not fetch manifest.json: {e}")
+        log_fn(f"[OTA ERROR] Both Tree API ({tree_err}) and manifest.json fallback failed ({e}).")
         return False
 
     files = manifest.get("files") or {}
     updated = 0
     warn_count = 0
     for rel_path, expected_sha in files.items():
-        if ".." in rel_path or rel_path.startswith("/") or ":" in rel_path:
+        if not _is_managed_ota_path(rel_path):
             continue
         dest = (ROOT_DIR / rel_path).resolve()
         if ROOT_DIR.resolve() not in dest.parents and dest != ROOT_DIR.resolve():
             continue
         if rel_path in FROZEN_BOOTSTRAP_FILES and dest.exists() and not include_bootstrap:
             continue
-        if dest.exists():
-            cur_sha = hashlib.sha256(dest.read_bytes()).hexdigest()
-            if expected_sha and cur_sha == expected_sha:
-                continue
-            if dest.parent == ROOT_DIR and dest.name in ("assistant_server.py", "ui_studio.html"):
-                STOCK_VAULT.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(dest, STOCK_VAULT / f"{dest.name}.good")
+        if dest.exists() and expected_sha and _matches_sha256_tolerant(dest.read_bytes(), expected_sha, rel_path):
+            continue
         file_url = f"{base_raw}/{rel_path}?t={bust}"
         try:
-            f_req = urllib.request.Request(file_url, headers=ota_headers)
+            f_req = urllib.request.Request(file_url, headers=raw_headers)
             with urllib.request.urlopen(f_req, timeout=25) as f_resp:
                 raw_bytes = f_resp.read()
-            if expected_sha and hashlib.sha256(raw_bytes).hexdigest() != expected_sha:
+            if expected_sha and not _matches_sha256_tolerant(raw_bytes, expected_sha, rel_path):
                 warn_count += 1
-                log_fn(f"[OTA WARN] SHA-256 mismatch for {rel_path} — skipped!")
+                log_fn(f"[OTA WARN] Checksum mismatch for {rel_path} — skipped!")
                 continue
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(raw_bytes)
+            ok_py, py_err = _verify_python_bytes(raw_bytes, rel_path)
+            if not ok_py:
+                warn_count += 1
+                log_fn(f"[OTA WARN] {py_err} — skipped!")
+                continue
+            if dest.exists() and dest.parent == ROOT_DIR and dest.name in ("assistant_server.py", "ui_studio.html"):
+                shutil.copy2(dest, STOCK_VAULT / f"{dest.name}.good")
+            _write_bytes_atomic(dest, raw_bytes)
             updated += 1
             log_fn(f"[OTA] Updated {rel_path} ({len(raw_bytes):,} bytes)")
         except Exception as fe:
@@ -542,7 +746,7 @@ def sync_from_github_ota(repo_slug: str = "", log_fn=print, include_bootstrap: b
 
     if warn_count == 0:
         try:
-            (ROOT_DIR / "manifest.json").write_bytes(manifest_raw)
+            _write_bytes_atomic(ROOT_DIR / "manifest.json", manifest_raw)
         except Exception:
             pass
     APP_VERSION = detect_runtime_version()
@@ -551,7 +755,6 @@ def sync_from_github_ota(repo_slug: str = "", log_fn=print, include_bootstrap: b
     else:
         log_fn(f"[OTA OK] Sync complete from {slug} (Runtime v{manifest.get('version', '?')} | {updated} file(s) updated).")
     return warn_count == 0
-
 
 REQUIRED_RUNTIME_FILES = (
     "assistant_server.py",

@@ -331,12 +331,14 @@ DEFAULT_CONFIG = {
     "workbench_trust": "safe_auto",
     "auto_web_search": True,
     "unrestricted_tokens": True,
-    "idle_unload_minutes": 10,
+    "idle_unload_minutes": 30,
     "mcp_auth_token": "",
     "ui_language": "en",
     "speech_locale": "en-US",
     "spellcheck_enabled": True,
-    "translate_bridge_mode": "native"
+    "translate_bridge_mode": "native",
+    "stream_tokens": True,
+    "kv_cache_q8": True
 }
 
 def load_workspace_config() -> dict:
@@ -1106,7 +1108,7 @@ def save_user_profile_card(card: dict):
 def format_backend_context_card() -> str:
     """Builds a tight, high-signal real-world state block held by the backend and injected every turn."""
     card = load_user_profile_card()
-    now_str = time.strftime("%A, %B %d, %Y | %H:%M")
+    now_str = time.strftime("%A, %B %d, %Y")
     loc_str = card.get("location") or "Not shared yet (ask user if needed for local weather/info)"
     if card.get("zip_code"):
         loc_str += f" (ZIP: {card['zip_code']})"
@@ -1117,7 +1119,7 @@ def format_backend_context_card() -> str:
             pass
     lines = [
         "[BACKEND-HELD REALITY & USER CONTEXT CARD (ALWAYS TRUST THIS OVER GUESSING)]:",
-        f"- Real Date & Local Time: {now_str}",
+        f"- Current Date: {now_str} (exact live clock is appended per turn)",
         f"- User: {card.get('user_name') or 'Creator'} | Real Location: {loc_str}"
     ]
     if card.get("custom_fields") and isinstance(card["custom_fields"], dict):
@@ -3677,7 +3679,7 @@ def build_pc_reality_anchor() -> str:
     libs_str = ", ".join(info["installed_libraries"][:14]) or "standard stdlib"
     return (
         "[LIVE PC REALITY ANCHOR — REAL HOST TELEMETRY]:\n"
-        f"- PC Hostname: {info['pc_hostname']} | OS: {info['os_platform']} | CPU: {info['cpu_threads']}T | RAM: {info['ram_free_gb']}/{info['ram_total_gb']} GB Free\n"
+        f"- PC Hostname: {info['pc_hostname']} | OS: {info['os_platform']} | CPU: {info['cpu_threads']}T | RAM: {info['ram_total_gb']} GB Total\n"
         f"- Workspace: {info['workspace_dir']} | Brain: {info['active_brain']} | Spotify: {info['spotify_status']} | OSWorld: {'ON' if info['osworld_enabled'] else 'OFF'}\n"
         f"- Installed Python Libraries: {libs_str}\n"
         "- STRICT GROUNDING RULE: NEVER invent PC names, fake terminal commands, or roleplay fake tool actions (like *opens Spotify* or *scans files*). "
@@ -5266,6 +5268,11 @@ def get_governor_settings(gear: str = "deep", prompt_chars: int = 1200):
       * Pairs with Rolling Auto-Continuation so even if a single pass hits finish_reason=='length', it keeps going!
     """
     cpu_count = os.cpu_count() or 4
+    try:
+        import psutil as _ps_cpu
+        phys_cores = _ps_cpu.cpu_count(logical=False) or max(2, cpu_count // 2)
+    except Exception:
+        phys_cores = max(2, cpu_count // 2)
     ram_total = float(get_system_ram_info().get("total_gb", 8.0))
     mode = STATE["performance_mode"]
     uncapped = is_unrestricted_tokens_enabled()
@@ -5273,17 +5280,25 @@ def get_governor_settings(gear: str = "deep", prompt_chars: int = 1200):
     if mode == "Laptop 2015 (Fast)" or cpu_count <= 2:
         n_ctx = 4096
         n_batch = 128 if cpu_count <= 2 else 256
+        gen_threads = max(2, phys_cores)
+        batch_threads = max(2, cpu_count - 1)
+    elif mode == "Eco (Safe)":
+        n_ctx = 4096
+        n_batch = 256
+        gen_threads = max(2, phys_cores)
+        batch_threads = max(2, cpu_count - 1)
     elif mode == "Turbo (Max Threads)":
-        n_ctx = 16384 if (uncapped and ram_total >= 15.0) else 8192
+        # Cap at 12288 with Q8_0 KV cache to prevent Vulkan VRAM spillover into system RAM
+        n_ctx = 12288 if (uncapped and ram_total >= 15.0) else 8192
         n_batch = 1024
+        gen_threads = max(2, phys_cores)
+        batch_threads = max(2, cpu_count)
     else:
-        if uncapped and ram_total >= 15.0:
-            n_ctx = 12288
-        elif uncapped and ram_total >= 7.5:
-            n_ctx = 8192
-        else:
-            n_ctx = 4096
+        # Reflex / Balanced: 8192 context keeps VRAM & RAM crisp with fast prefill & high tok/s
+        n_ctx = 8192 if (uncapped and ram_total >= 7.5) else 4096
         n_batch = 512
+        gen_threads = max(2, phys_cores)
+        batch_threads = max(2, cpu_count - 1)
 
     actual_ctx = n_ctx
     if STATE.get("llm") is not None and hasattr(STATE["llm"], "n_ctx") and callable(STATE["llm"].n_ctx):
@@ -5303,10 +5318,12 @@ def get_governor_settings(gear: str = "deep", prompt_chars: int = 1200):
         safe_max_tokens = max(1024 if uncapped else 512, actual_ctx - est_prompt_tokens)
 
     return {
-        "threads": max(2, cpu_count - 1),
+        "threads": gen_threads,
+        "threads_batch": batch_threads,
         "n_ctx": n_ctx,
         "actual_ctx": actual_ctx,
         "n_batch": n_batch,
+        "n_ubatch": min(256, n_batch),
         "max_tokens": safe_max_tokens,
         "uncapped": uncapped
     }
@@ -5326,8 +5343,13 @@ def resolve_local_model_path(filename: str) -> Path:
                     return p
     return direct
 
-def list_local_models():
-    """Scans /models (and /stock_vault/models + /hf_cache) for any offline .gguf files."""
+_LOCAL_MODELS_CACHE = {"ts": 0.0, "items": []}
+
+def list_local_models(force: bool = False):
+    """Scans /models (and /stock_vault/models + /hf_cache) with an 8s TTL cache so 2s /status polling never thrashes disk."""
+    now = time.time()
+    if not force and _LOCAL_MODELS_CACHE["items"] and (now - _LOCAL_MODELS_CACHE["ts"]) < 8.0:
+        return list(_LOCAL_MODELS_CACHE["items"])
     found = {}
     stock_models = BASE_DIR / "stock_vault" / "models"
     for search_root in (MODEL_DIR, stock_models, HF_CACHE_DIR):
@@ -5335,7 +5357,9 @@ def list_local_models():
             for p in search_root.rglob("*"):
                 if p.is_file() and p.suffix.lower() == ".gguf" and not p.name.endswith(".part"):
                     found.setdefault(p.name, p)
-    return sorted(found.keys())
+    res = sorted(found.keys())
+    _LOCAL_MODELS_CACHE.update({"ts": now, "items": res})
+    return list(res)
 
 def load_local_model(filename: str):
     if Llama is None:
@@ -5360,17 +5384,29 @@ def load_local_model(filename: str):
             gpu_layers = -1 if STATE["gpu_offload"] else 0
             try:
                 use_mmap_flag = False if (os.cpu_count() or 4) <= 2 else True
-                STATE["llm"] = Llama(
+                llama_kwargs = dict(
                     model_path=str(model_path),
                     n_ctx=cfg["n_ctx"],
                     n_threads=cfg["threads"],
-                    n_threads_batch=max(2, (os.cpu_count() or 4) - 1),
+                    n_threads_batch=cfg.get("threads_batch", max(2, (os.cpu_count() or 4) - 1)),
                     n_batch=cfg["n_batch"],
+                    n_ubatch=cfg.get("n_ubatch", min(256, cfg["n_batch"])),
                     n_gpu_layers=gpu_layers,
                     use_mmap=use_mmap_flag,
                     flash_attn=True if STATE["gpu_offload"] else False,
                     verbose=False
                 )
+                if WORKSPACE_CFG.get("kv_cache_q8", True):
+                    # GGML_TYPE_Q8_0 = 8: cuts KV cache RAM/VRAM by ~50% with near-zero quality loss
+                    llama_kwargs["type_k"] = 8
+                    llama_kwargs["type_v"] = 8
+                try:
+                    STATE["llm"] = Llama(**llama_kwargs)
+                except TypeError:
+                    # Older llama-cpp-python wheel fallback (drop optional type_k/type_v/n_ubatch)
+                    for opt_k in ("type_k", "type_v", "n_ubatch"):
+                        llama_kwargs.pop(opt_k, None)
+                    STATE["llm"] = Llama(**llama_kwargs)
             except Exception as first_err:
                 # Self-healing fallback: if Vulkan GPU offload or flash_attn fails on a 2015 laptop / low VRAM,
                 # automatically fall back to pure CPU multi-thread mode with safe context size!
@@ -5651,7 +5687,8 @@ def build_safe_messages(static_sys_prompt: str, dynamic_turn_context: str, recen
                 + "\n".join(recap_lines)
             )
 
-    prefix_parts = [p for p in (thread_recap, dynamic_turn_context.strip()) if p]
+    live_clock_tag = f"[Live Local Time: {time.strftime('%H:%M')}]"
+    prefix_parts = [p for p in (live_clock_tag, thread_recap, dynamic_turn_context.strip()) if p]
     if prefix_parts:
         cleaned[-1]["content"] = "\n\n".join(prefix_parts) + f"\n\n{user_name}: {cleaned[-1]['content']}"
 
@@ -6784,11 +6821,27 @@ def generate_sync_reply_for_telegram(user_text: str, session_id: str = "telegram
             static_sys = f"{digest}\n\n=== SESSION STATE ===\n{mem_short}"
             messages = build_safe_messages(static_sys, "", recent_turns, max_turns=3)
             cfg = get_governor_settings("reflex", sum(len(m["content"]) for m in messages))
-            reply = dispatch_brain_sync(
+            _g1_parts = []
+            _g1_toks = 0
+            _g1_t0 = time.time()
+            _g1_tick = _g1_t0
+            for _ch in dispatch_brain_stream(
                 messages=messages, max_tokens=cfg["max_tokens"],
                 temperature=0.75, top_p=0.92, min_p=0.12, repeat_penalty=1.15,
                 stop=["<START>", f"\n{usr_n}:", "\nUser:", "[INST]", "[/INST]"]
-            )
+            ):
+                if STATE["stop_requested"]:
+                    break
+                _d = (_ch.get("choices") or [{}])[0].get("delta", {}).get("content") or ""
+                if _d:
+                    _g1_parts.append(_d)
+                    _g1_toks += 1
+                    _now_s = time.time()
+                    if (_now_s - _g1_tick) >= 1.9:
+                        _g1_tick = _now_s
+                        _tps = _g1_toks / max(0.1, _now_s - _g1_t0)
+                        _notify(f"⚡ Reflex generating ({_g1_toks} tokens • {_tps:.1f} tok/s)...")
+            reply = "".join(_g1_parts).strip()
             if any(tag in reply for tag in ("[[DEEP]]", "[DEEP]", "<tool_call>", "```workbench", "vault.")):
                 gear = "operator"
             else:
@@ -6835,12 +6888,28 @@ def generate_sync_reply_for_telegram(user_text: str, session_id: str = "telegram
             for r_idx in range(max_rounds):
                 if STATE["stop_requested"]:
                     break
-                _notify(f"💭 Generating response (Pass {r_idx+1}/{max_rounds})...")
-                round_raw = dispatch_brain_sync(
+                _notify(f"✍️ Generating response (Pass {r_idx+1}/{max_rounds})...")
+                _tg_parts = []
+                _tg_toks = 0
+                _tg_t0 = time.time()
+                _tg_last_tick = _tg_t0
+                for _ch in dispatch_brain_stream(
                     messages=messages, max_tokens=cfg["max_tokens"],
                     temperature=0.75, top_p=0.95, min_p=0.12, repeat_penalty=1.15,
                     stop=["<START>", f"\n{usr_n}:", "\nUser:", "[INST]", "[/INST]"]
-                )
+                ):
+                    if STATE["stop_requested"]:
+                        break
+                    _d = (_ch.get("choices") or [{}])[0].get("delta", {}).get("content") or ""
+                    if _d:
+                        _tg_parts.append(_d)
+                        _tg_toks += 1
+                        _now_s = time.time()
+                        if (_now_s - _tg_last_tick) >= 1.9:
+                            _tg_last_tick = _now_s
+                            _tps = _tg_toks / max(0.1, _now_s - _tg_t0)
+                            _notify(f"✍️ Generating reply ({_tg_toks} tokens • {_tps:.1f} tok/s)...")
+                round_raw = "".join(_tg_parts).strip()
                 stripped = re.sub(r"<think>[\s\S]*?</think>", "", round_raw, flags=re.IGNORECASE).strip()
                 wb_blocks, wb_cleaned = extract_workbench_blocks(stripped)
                 inline_calls, cleaned_round = extract_inline_tool_calls(wb_cleaned)
@@ -6886,7 +6955,7 @@ def generate_sync_reply_for_telegram(user_text: str, session_id: str = "telegram
             conn.execute("INSERT INTO chat_messages (session_id, role, content) VALUES (?, 'assistant', ?)", (session_id, reply))
             conn.execute("UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (session_id,))
             conn.commit()
-        export_chats_to_txt_files()
+        threading.Thread(target=export_chats_to_txt_files, daemon=True).start()
         return reply, img_out, aud_out
     except Exception as tg_err:
         err_s = f"{type(tg_err).__name__}: {tg_err}"
@@ -7022,23 +7091,45 @@ def telegram_polling_worker():
                 TELEGRAM_QUEUE_STATE["active"] = True
                 TELEGRAM_QUEUE_STATE["last_user"] = text[:80]
                 _tg_api_post(token, "sendChatAction", {"chat_id": chat_id, "action": "typing"}, timeout=6)
-                q_note = f" (Queued behind: {TELEGRAM_QUEUE_STATE['queued']})" if TELEGRAM_QUEUE_STATE["queued"] > 0 else ""
-                status_mid = _tg_edit_or_send_status(token, chat_id, 0, f"⏳ Working on it...{q_note}")
-                last_edit_ts = [time.time()]
+                ai_lbl = WORKSPACE_CFG.get("ai_name", "Aether")
+                q_note = f" | Queue: {TELEGRAM_QUEUE_STATE['queued']}" if TELEGRAM_QUEUE_STATE["queued"] > 0 else ""
+                tg_t0 = time.time()
+                tg_steps = ["⏳ Received message — starting turn..."]
+                status_mid = _tg_edit_or_send_status(token, chat_id, 0, f"⚡ {ai_lbl} • Live Status (0.0s{q_note})\n• {tg_steps[0]}")
+                last_edit_ts = [tg_t0]
 
                 def _on_tg_progress(step_s: str):
+                    clean_s = str(step_s or "").strip()
+                    if clean_s:
+                        # Update the trailing generating line in-place instead of spamming duplicate lines
+                        if tg_steps and ("Generating" in clean_s or "generating" in clean_s) and ("Generating" in tg_steps[-1] or "generating" in tg_steps[-1]):
+                            tg_steps[-1] = clean_s
+                        elif not tg_steps or tg_steps[-1] != clean_s:
+                            tg_steps.append(clean_s)
                     now_t = time.time()
-                    if (now_t - last_edit_ts[0]) >= 1.8:
+                    if (now_t - last_edit_ts[0]) >= 2.0:
                         last_edit_ts[0] = now_t
+                        elapsed = now_t - tg_t0
                         _tg_api_post(token, "sendChatAction", {"chat_id": chat_id, "action": "typing"}, timeout=5)
-                        _tg_edit_or_send_status(token, chat_id, status_mid, f"⚙️ {step_s}")
+                        body = "\n".join(f"• {s}" for s in tg_steps[-5:])
+                        _tg_edit_or_send_status(token, chat_id, status_mid, f"⚡ {ai_lbl} • Working ({elapsed:.1f}s{q_note})\n{body}")
 
                 try:
                     reply, img_url, aud_url = generate_sync_reply_for_telegram(text, session_id=f"telegram_{chat_id}", progress_cb=_on_tg_progress)
-                    if status_mid:
-                        _tg_api_post(token, "deleteMessage", {"chat_id": chat_id, "message_id": status_mid}, timeout=6)
-                    for _tg_part in avs_bridges.chunk_telegram_message(reply):
-                        _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": _tg_part}, timeout=15)
+                    chunks_out = avs_bridges.chunk_telegram_message(reply)
+                    # Zero-gap delivery: send the completed final reply FIRST, then remove the status card AFTER
+                    # (or edit the status card in-place when telegram.edit_in_place is enabled & reply fits in 1 chunk)
+                    edit_in_place = bool((WORKSPACE_CFG.get("telegram") or {}).get("edit_in_place", False))
+                    if edit_in_place and status_mid and len(chunks_out) == 1:
+                        ed_res = _tg_api_post(token, "editMessageText", {"chat_id": chat_id, "message_id": status_mid, "text": chunks_out[0]}, timeout=15)
+                        if not ed_res.get("ok"):
+                            _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": chunks_out[0]}, timeout=15)
+                            _tg_api_post(token, "deleteMessage", {"chat_id": chat_id, "message_id": status_mid}, timeout=6)
+                    else:
+                        for _tg_part in chunks_out:
+                            _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": _tg_part}, timeout=15)
+                        if status_mid:
+                            _tg_api_post(token, "deleteMessage", {"chat_id": chat_id, "message_id": status_mid}, timeout=6)
                     _tg_send_media(token, chat_id, img_url=img_url, audio_url=aud_url)
                     TELEGRAM_QUEUE_STATE["processed_count"] = int(TELEGRAM_QUEUE_STATE.get("processed_count") or 0) + 1
                 finally:
@@ -7537,65 +7628,246 @@ def api_terminal_exec(payload: dict):
         return {"ok": True, "output": run_silent_shell_command(arg)}
     return {"ok": False, "output": f"Unknown command '{cmd}'. Type /help for available commands."}
 
+OTA_TEXT_EXTS = {".py", ".html", ".json", ".md", ".svg", ".sh", ".bat", ".txt", ".gitattributes"}
+OTA_ROOT_FILES = {
+    "assistant_server.py", "ui_studio.html", "aethervault_logo.svg",
+    "AetherVault_Studio_Manual.pdf", "README.md", "manifest.json",
+    ".gitattributes", "Launch.bat", "Launch.sh", "manager.py"
+}
+OTA_MANAGED_PREFIXES = ("avs/", "locales/", "tests/")
+
+
+def _is_managed_ota_path(rel_path: str) -> bool:
+    norm = str(rel_path or "").replace("\\", "/").lstrip("/")
+    if not norm or ".." in norm or ":" in norm:
+        return False
+    if norm in OTA_ROOT_FILES or norm == "custom_tools/README.md":
+        return True
+    return any(norm.startswith(pref) for pref in OTA_MANAGED_PREFIXES)
+
+
+def _git_blob_sha1(data: bytes) -> str:
+    return hashlib.sha1(f"blob {len(data)}\0".encode("ascii") + data).hexdigest()
+
+
+def _matches_git_blob_sha(data: bytes, expected_sha: str, rel_path: str) -> bool:
+    if not expected_sha:
+        return True
+    if _git_blob_sha1(data) == expected_sha:
+        return True
+    ext = Path(rel_path).suffix.lower() or Path(rel_path).name.lower()
+    if ext in OTA_TEXT_EXTS:
+        return _git_blob_sha1(data.replace(b"\r\n", b"\n")) == expected_sha
+    return False
+
+
+def _matches_sha256_tolerant(data: bytes, expected_sha: str, rel_path: str) -> bool:
+    if not expected_sha:
+        return True
+    if hashlib.sha256(data).hexdigest() == expected_sha:
+        return True
+    ext = Path(rel_path).suffix.lower() or Path(rel_path).name.lower()
+    if ext in OTA_TEXT_EXTS:
+        return hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest() == expected_sha
+    return False
+
+
+def _verify_python_bytes(raw_bytes: bytes, rel_path: str) -> tuple:
+    if not rel_path.endswith(".py"):
+        return True, ""
+    try:
+        src = raw_bytes.decode("utf-8")
+        ast.parse(src, filename=rel_path)
+        compile(src, rel_path, "exec")
+        return True, ""
+    except Exception as e:
+        return False, f"Python syntax gate rejected {rel_path}: {e}"
+
+
+def _write_bytes_atomic(dest: Path, raw_bytes: bytes):
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".ota_tmp")
+    tmp.write_bytes(raw_bytes)
+    tmp.replace(dest)
+
+
 @app.post("/api/ota/update")
 def api_ota_update():
-    """Pulls latest core files from GitHub (SHA-256 verified, cache-busted) directly from the UI or phone."""
+    """
+    Commit-Pinned GitHub Tree Sync + ETag 304 + Python Syntax Gate + CRLF-Safe Manifest Fallback.
+    Works with zero API tokens on public repos (optional github_token / AVS_GITHUB_TOKEN raises rate limit to 5,000/hr).
+    """
     slug = (WORKSPACE_CFG.get("github_repo") or "EnZeeeRu/AetherVault-Studio").strip().strip("/")
-    base_raw = f"https://raw.githubusercontent.com/{slug}/main"
-    bust = int(time.time())
-    ota_headers = {"User-Agent": f"AetherVaultStudio/{APP_VERSION}", "Cache-Control": "no-cache", "Pragma": "no-cache"}
+    api_base = os.environ.get("AVS_GITHUB_API_BASE", "https://api.github.com").rstrip("/")
+    raw_base = os.environ.get("AVS_GITHUB_RAW_BASE", "https://raw.githubusercontent.com").rstrip("/")
+    gh_token = (os.environ.get("AVS_GITHUB_TOKEN") or WORKSPACE_CFG.get("github_token") or "").strip()
+
+    api_headers = {"User-Agent": f"AetherVaultStudio/{APP_VERSION}", "Accept": "application/vnd.github+json"}
+    raw_headers = {"User-Agent": f"AetherVaultStudio/{APP_VERSION}", "Cache-Control": "no-cache", "Pragma": "no-cache"}
+    if gh_token:
+        api_headers["Authorization"] = f"Bearer {gh_token}"
+        raw_headers["Authorization"] = f"Bearer {gh_token}"
+
+    stock_dir = BASE_DIR / "stock_vault"
+    stock_dir.mkdir(parents=True, exist_ok=True)
+    ota_state_path = stock_dir / "ota_state.json"
+    ota_state = {}
+    if ota_state_path.exists():
+        try:
+            ota_state = json.loads(ota_state_path.read_text(encoding="utf-8"))
+        except Exception:
+            ota_state = {}
+
+    frozen_bootstrappers = {"Launch.bat", "Launch.sh", "manager.py"}
+    updated = []
+    warnings_list = []
+    tree_err = None
+
+    # --- PRIMARY PATH: GitHub Commit-Pinned Tree Sync ---
     try:
-        r = requests.get(f"{base_raw}/manifest.json?t={bust}", headers=ota_headers, timeout=15)
+        c_headers = dict(api_headers)
+        if ota_state.get("repo") == slug and ota_state.get("etag"):
+            c_headers["If-None-Match"] = ota_state["etag"]
+        cr = requests.get(f"{api_base}/repos/{slug}/commits/main", headers=c_headers, timeout=15)
+        if cr.status_code == 304:
+            short_c = str(ota_state.get("commit_sha") or "")[:7] or "main"
+            return {
+                "ok": True,
+                "version": APP_VERSION,
+                "commit": short_c,
+                "updated": [],
+                "warnings": [],
+                "output": f"[OTA OK] Already up to date with {slug}@{short_c} (304 Not Modified — 0 API quota used)."
+            }
+        cr.raise_for_status()
+        commit_data = cr.json()
+        new_etag = cr.headers.get("ETag") or ""
+        commit_sha = str(commit_data.get("sha") or "").strip()
+        tree_sha = str(((commit_data.get("commit") or {}).get("tree") or {}).get("sha") or commit_sha).strip()
+        commit_date = str(((commit_data.get("commit") or {}).get("committer") or {}).get("date") or "").strip()
+        if not commit_sha or not tree_sha:
+            raise RuntimeError("Incomplete commit response from GitHub API")
+
+        tr = requests.get(f"{api_base}/repos/{slug}/git/trees/{tree_sha}?recursive=1", headers=api_headers, timeout=20)
+        tr.raise_for_status()
+        tree_payload = tr.json()
+        blobs = [
+            it for it in (tree_payload.get("tree") or [])
+            if it.get("type") == "blob" and _is_managed_ota_path(it.get("path") or "")
+        ]
+        if not blobs:
+            raise RuntimeError("GitHub tree returned 0 managed runtime blobs")
+
+        for item in blobs:
+            rel_path = str(item["path"]).replace("\\", "/").lstrip("/")
+            remote_blob_sha = str(item.get("sha") or "").strip()
+            dest = (BASE_DIR / rel_path).resolve()
+            if BASE_DIR.resolve() not in dest.parents and dest != BASE_DIR.resolve():
+                continue
+            if rel_path in frozen_bootstrappers and dest.exists():
+                continue
+            if dest.exists() and _matches_git_blob_sha(dest.read_bytes(), remote_blob_sha, rel_path):
+                continue
+            try:
+                fr = requests.get(f"{raw_base}/{slug}/{commit_sha}/{rel_path}", headers=raw_headers, timeout=25)
+                fr.raise_for_status()
+                raw_b = fr.content
+                if remote_blob_sha and not _matches_git_blob_sha(raw_b, remote_blob_sha, rel_path):
+                    warnings_list.append(f"Blob integrity check failed for {rel_path} — skipped")
+                    continue
+                ok_py, py_err = _verify_python_bytes(raw_b, rel_path)
+                if not ok_py:
+                    warnings_list.append(py_err)
+                    continue
+                if dest.exists() and dest.parent == BASE_DIR.resolve() and dest.name in ("assistant_server.py", "ui_studio.html"):
+                    shutil.copy2(dest, stock_dir / f"{dest.name}.good")
+                _write_bytes_atomic(dest, raw_b)
+                updated.append(rel_path)
+            except Exception as fe:
+                warnings_list.append(f"Failed {rel_path}: {fe}")
+
+        if not warnings_list:
+            try:
+                ota_state_path.write_text(json.dumps({
+                    "repo": slug,
+                    "commit_sha": commit_sha,
+                    "etag": new_etag,
+                    "commit_date": commit_date,
+                    "synced_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                }, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+
+        ver_new = APP_VERSION
+        m_p = BASE_DIR / "manifest.json"
+        if m_p.exists():
+            try:
+                ver_new = str(json.loads(m_p.read_text(encoding="utf-8")).get("version") or APP_VERSION)
+            except Exception:
+                pass
+        warn_suffix = (" | Warnings: " + "; ".join(warnings_list)) if warnings_list else ""
+        tag = "[OTA PARTIAL]" if warnings_list else "[OTA OK]"
+        if updated:
+            msg = f"{tag} Synced {len(updated)} file(s) from {slug}@{commit_sha[:7]} (v{ver_new}): {', '.join(updated)}. Reload page (or restart server if .py changed)!{warn_suffix}"
+        else:
+            msg = f"{tag} Already up to date with {slug}@{commit_sha[:7]} (v{ver_new}).{warn_suffix}"
+        return {"ok": len(warnings_list) == 0, "mode": "github_tree", "commit": commit_sha[:7], "version": ver_new, "updated": updated, "warnings": warnings_list, "output": msg}
+    except Exception as e:
+        tree_err = e
+
+    # --- FALLBACK PATH: CRLF-Safe manifest.json ---
+    base_raw = f"{raw_base}/{slug}/main"
+    bust = int(time.time())
+    try:
+        r = requests.get(f"{base_raw}/manifest.json?t={bust}", headers=raw_headers, timeout=15)
         r.raise_for_status()
         manifest_raw = r.content
         manifest = r.json()
     except Exception as e:
-        return {"ok": False, "output": f"[OTA ERROR] Could not fetch manifest.json: {e}"}
+        return {"ok": False, "output": f"[OTA ERROR] GitHub Tree API ({tree_err}) and manifest.json fallback both failed: {e}"}
 
     files = manifest.get("files") or {}
-    updated = []
-    warnings_list = []
-    stock_dir = BASE_DIR / "stock_vault"
-    stock_dir.mkdir(parents=True, exist_ok=True)
-    frozen_bootstrappers = {"Launch.bat", "Launch.sh", "manager.py"}
     for rel_path, expected_sha in files.items():
-        if ".." in rel_path or rel_path.startswith("/") or ":" in rel_path:
+        if not _is_managed_ota_path(rel_path):
             continue
         dest = (BASE_DIR / rel_path).resolve()
         if BASE_DIR.resolve() not in dest.parents and dest != BASE_DIR.resolve():
             continue
         if rel_path in frozen_bootstrappers and dest.exists():
             continue
-        if dest.exists() and expected_sha and hashlib.sha256(dest.read_bytes()).hexdigest() == expected_sha:
+        if dest.exists() and expected_sha and _matches_sha256_tolerant(dest.read_bytes(), expected_sha, rel_path):
             continue
         try:
-            fr = requests.get(f"{base_raw}/{rel_path}?t={bust}", headers=ota_headers, timeout=25)
+            fr = requests.get(f"{base_raw}/{rel_path}?t={bust}", headers=raw_headers, timeout=25)
             fr.raise_for_status()
-            raw_b = fr.read()
-            if expected_sha and hashlib.sha256(raw_b).hexdigest() != expected_sha:
-                warnings_list.append(f"SHA-256 mismatch for {rel_path} — skipped")
+            raw_b = fr.content
+            if expected_sha and not _matches_sha256_tolerant(raw_b, expected_sha, rel_path):
+                warnings_list.append(f"Checksum mismatch for {rel_path} — skipped")
+                continue
+            ok_py, py_err = _verify_python_bytes(raw_b, rel_path)
+            if not ok_py:
+                warnings_list.append(py_err)
                 continue
             if dest.exists() and dest.parent == BASE_DIR.resolve() and dest.name in ("assistant_server.py", "ui_studio.html"):
                 shutil.copy2(dest, stock_dir / f"{dest.name}.good")
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(raw_b)
+            _write_bytes_atomic(dest, raw_b)
             updated.append(rel_path)
         except Exception as fe:
             warnings_list.append(f"Failed {rel_path}: {fe}")
 
     if not warnings_list:
         try:
-            (BASE_DIR / "manifest.json").write_bytes(manifest_raw)
+            _write_bytes_atomic(BASE_DIR / "manifest.json", manifest_raw)
         except Exception:
             pass
     ver_new = manifest.get("version", "?")
     warn_suffix = (" | Warnings: " + "; ".join(warnings_list)) if warnings_list else ""
     tag = "[OTA PARTIAL]" if warnings_list else "[OTA OK]"
     if updated:
-        msg = f"{tag} Updated {len(updated)} file(s) to v{ver_new}: {', '.join(updated)}. Reload page (or restart server if .py changed)!{warn_suffix}"
+        msg = f"{tag} Updated {len(updated)} file(s) via manifest fallback to v{ver_new}: {', '.join(updated)}. Reload page (or restart server if .py changed)!{warn_suffix}"
     else:
-        msg = f"{tag} Already up to date with {slug} (v{ver_new}).{warn_suffix}"
-    return {"ok": len(warnings_list) == 0, "version": ver_new, "updated": updated, "warnings": warnings_list, "output": msg}
+        msg = f"{tag} Already up to date with {slug} (v{ver_new} via manifest fallback).{warn_suffix}"
+    return {"ok": len(warnings_list) == 0, "mode": "manifest_fallback", "version": ver_new, "updated": updated, "warnings": warnings_list, "output": msg}
 
 @app.post("/api/system/restart")
 def api_system_restart():
@@ -8867,8 +9139,8 @@ def chat_stream(payload: dict):
                         if not delta:
                             continue
                         round_reply += delta
-
-                        if has_repetition_delirium(round_reply):
+                        _tok_n = len(round_reply)
+                        if (_tok_n & 15) == 0 and has_repetition_delirium(round_reply):
                             delirium_hit = True
                             err_card = format_predetermined_error("ERR_DELIRIUM_LOOP")
                             yield json.dumps({"type": "issue", "issue": err_card}) + "\n"
@@ -9556,16 +9828,23 @@ atexit.register(cleanup_session_temp_cache)
 def on_shutdown():
     cleanup_session_temp_cache()
 
-def get_temp_cache_stats() -> dict:
+_TEMP_CACHE_STATS_MEM = {"ts": 0.0, "data": None}
+
+def get_temp_cache_stats(force: bool = False) -> dict:
+    now = time.time()
+    if not force and _TEMP_CACHE_STATS_MEM["data"] is not None and (now - _TEMP_CACHE_STATS_MEM["ts"]) < 8.0:
+        return _TEMP_CACHE_STATS_MEM["data"]
     TEMP_SESSION_DIR.mkdir(parents=True, exist_ok=True)
     files = [f for f in TEMP_SESSION_DIR.rglob("*") if f.is_file()]
     total_kb = round(sum(f.stat().st_size for f in files) / 1024.0, 1)
-    return {
+    out = {
         "session_temp_dir": str(TEMP_SESSION_DIR),
         "cached_files": len(files),
         "size_kb": total_kb,
         "file_names": [f.name for f in files[:10]]
     }
+    _TEMP_CACHE_STATS_MEM.update({"ts": now, "data": out})
+    return out
 
 def record_temp_gear_cache(gear: str, sys_prompt_text: str):
     """Saves the evaluated static prefix & metadata for Gear 1 (reflex) and Gear 2 (deep) in %TEMP%."""

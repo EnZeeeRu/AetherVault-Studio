@@ -1277,6 +1277,7 @@
     <div class="card-header">
       <h3>⚡ Two-Gear Governor & Mode</h3>
       <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+        <label style="font-size:0.72rem; cursor:pointer; color:#e9d5ff;" title="Checked = Live token streaming; Unchecked = Show real-time status & tok/s, then display the finished reply cleanly once done!"><input type="checkbox" id="stream-tokens-toggle" checked onchange="toggleStreamTokens()"> 🌊 Stream</label>
         <label style="font-size:0.72rem; cursor:pointer; color:#a7f3d0;" title="Uncapped Deep-Run Mode: expands context headroom, allows up to 8 chained Workbench steps, and auto-continues seamlessly if a reply hits the per-pass token limit"><input type="checkbox" id="uncapped-toggle" checked onchange="toggleUnrestrictedTokens()"> ♾️ Uncapped</label>
         <label style="font-size:0.72rem; cursor:pointer; color:#bae6fd;" title="Auto-search the web whenever a small local model hits its training cutoff or a Workbench script needs online docs"><input type="checkbox" id="autoweb-toggle" checked onchange="toggleAutoWeb()"> 🌐 Web</label>
         <label style="font-size:0.72rem; cursor:pointer;"><input type="checkbox" id="offline-toggle" onchange="toggleOffline()"> Offline</label>
@@ -1983,7 +1984,7 @@
             <span class="gear-pill" id="ota-version-pill" style="border-color:#10b981; color:#a7f3d0;">v6.8 Bluesky</span>
           </div>
           <p style="font-size:0.75rem; color:#9ca3af; margin:4px 0 8px 0;">
-            Push an update to GitHub from anywhere, then tap <b>Pull GitHub Update</b> on your phone or PC to SHA-256 verify &amp; sync core files without touching your memories, models, or chats.
+            Push an update to GitHub from anywhere, then tap <b>Pull GitHub Update</b> on your phone or PC for commit-pinned GitHub Tree Sync (ETag 304 + Python syntax gate, CRLF-safe, zero API token needed) without touching your memories, models, or chats.
           </p>
           <div style="display:flex; gap:6px; flex-wrap:wrap;">
             <button class="small-btn" onclick="triggerWebOtaUpdate()">⬇️ Pull GitHub Update (/update)</button>
@@ -3855,6 +3856,8 @@ async function refreshStatus() {
     if (awChk && data.auto_web_search !== undefined) awChk.checked = Boolean(data.auto_web_search);
     const uncChk = document.getElementById('uncapped-toggle');
     if (uncChk && data.unrestricted_tokens !== undefined) uncChk.checked = Boolean(data.unrestricted_tokens);
+    const stChk = document.getElementById('stream-tokens-toggle');
+    if (stChk && data.config && data.config.stream_tokens !== undefined) stChk.checked = Boolean(data.config.stream_tokens);
     const perfSel = document.getElementById('perf-select');
     if (document.activeElement !== perfSel && data.performance_mode) {
       perfSel.value = data.performance_mode;
@@ -4873,6 +4876,7 @@ async function sendMessage() {
     if (sumEl) sumEl.addEventListener('click', () => { userTouchedDetails = true; });
   }
 
+  window._activeGenTokens = 0;
   let latestStepShort = `${aiName} is thinking...`;
   const t0 = Date.now();
   const timerId = setInterval(() => {
@@ -4944,8 +4948,16 @@ async function sendMessage() {
                 <div style="margin-top:5px;"><button class="msg-act-btn" onclick="openStudioModal('tab-manual')">📖 Check Manual (Specs & Troubleshooting)</button></div>
               </div>`;
           } else if (evt.type === 'token') {
-            replyTextDiv.textContent += evt.text;
-            box.scrollTop = box.scrollHeight;
+            window._activeGenTokens = (window._activeGenTokens || 0) + 1;
+            const streamOn = !(window.workspaceConfig && window.workspaceConfig.stream_tokens === false);
+            if (streamOn) {
+              replyTextDiv.textContent += evt.text;
+              box.scrollTop = box.scrollHeight;
+            } else {
+              const secNow = Math.max(0.1, (Date.now() - t0) / 1000);
+              const tps = (window._activeGenTokens / secNow).toFixed(1);
+              latestStepShort = `✍️ Generating reply (${window._activeGenTokens} tokens • ${tps} tok/s)`;
+            }
           } else if (evt.type === 'done') {
             clearInterval(timerId);
             const totalTime = ((Date.now() - t0) / 1000).toFixed(1);
@@ -5207,6 +5219,18 @@ async function toggleAutoWeb() {
       body: JSON.stringify({ auto_web_search: enabled })
     });
   });
+}
+
+async function toggleStreamTokens() {
+  const chk = document.getElementById('stream-tokens-toggle');
+  const enabled = chk ? chk.checked : true;
+  if (window.workspaceConfig) window.workspaceConfig.stream_tokens = enabled;
+  await fetch('/config/update', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ stream_tokens: enabled })
+  });
+  showToast(enabled ? '🌊 Live Token Streaming ON' : '✅ Send-When-Finished Mode ON (real-time tok/s status bar)');
 }
 
 async function toggleUnrestrictedTokens() {
