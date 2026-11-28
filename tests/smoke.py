@@ -37,7 +37,12 @@ def main() -> int:
     import xml.etree.ElementTree as ET
     from avs import (
         bridges,
+        cloud_files,
+        cloud_sync,
         contracts,
+        dlna_server,
+        fs_ops,
+        introspect,
         hardware_monitor,
         language_tools,
         manual_assets,
@@ -103,8 +108,21 @@ def main() -> int:
         if sec.get("svg"):
             ET.fromstring(sec["svg"])
     ET.fromstring((ROOT / "aethervault_logo.svg").read_text(encoding="utf-8"))
+    ET.fromstring((ROOT / "release_emblem.svg").read_text(encoding="utf-8"))
+    assert cloud_sync.parse_gdrive_or_doc_url("https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQr/edit") == ("gdoc", "1AbCdEfGhIjKlMnOpQr")
+    assert cloud_sync.parse_gdrive_or_doc_url("https://drive.google.com/file/d/1XyZ9876543210AbCd/view") == ("gdrive", "1XyZ9876543210AbCd")
     assert (ROOT / "AetherVault_Studio_Manual.pdf").read_bytes().startswith(b"%PDF-")
-    print("[PASS 3/7] All 13 modular avs/ components, locales, SVG manual diagrams & PDF verified.")
+    assert cloud_files.parse_byte_range("bytes=0-99", 1000) == (0, 99)
+    assert cloud_files.parse_byte_range("bytes=500-", 1000) == (500, 999)
+    assert cloud_files.classify_ext(".mp4") == "video" and cloud_files.classify_ext(".webp") == "image"
+    dlna_test = dlna_server.DLNAMediaServer(lambda: "127.0.0.1", lambda: 8000, lambda: [])
+    assert "<deviceType>urn:schemas-upnp-org:device:MediaServer:1</deviceType>" in dlna_test.build_device_xml()
+    assert "BrowseResponse" in dlna_test.handle_soap_action("Browse", "<ObjectID>0</ObjectID>", "http://127.0.0.1:8000")
+    assert "INSPECT: json" in introspect.inspect_target("json")
+    assert "avs" in fs_ops.tree(str(ROOT), depth=1)
+    for ui_asset in ("studio.css", "media.js", "composer.js", "cloud.js", "telegram.js"):
+        assert (ROOT / "avs" / "ui" / ui_asset).exists(), f"Missing modular UI asset: avs/ui/{ui_asset}"
+    print("[PASS 3/7] All 17 modular avs/ components, avs/ui/* assets, locales, SVG manual diagrams & PDF verified.")
 
     # 4. Verify isolated subprocess Workbench execution + Safe Auto gate
     wb_ok = workbench.run_workbench_subprocess("print(6 * 7)", ROOT / ".temp_cache", port=8000, token="smoke", timeout_sec=10, trust_level="safe_auto")
@@ -135,7 +153,11 @@ def main() -> int:
     for dom_id in (
         "cfg-bsky-handle", "cfg-bsky-pass", "cfg-bsky-enabled", "cfg-tg-token", "cfg-sp-id",
         "quick-lang-select", "spellcheck-btn", "spellcheck-bar", "cfg-ui-lang", "cfg-speech-locale",
-        "cfg-translate-bridge", "cfg-spellcheck-enabled", "cfg-argos-from", "cfg-argos-to", "manual-toc-bar"
+        "cfg-translate-bridge", "cfg-spellcheck-enabled", "cfg-argos-from", "cfg-argos-to", "manual-toc-bar",
+        "tab-commands", "commands-search-input", "commands-sheet-container", "about-release-emblem", "cfg-cs-provider", "cs-quick-url-input",
+        "leo-composer", "composer-media-tray", "leo-skills-popover", "leo-attach-popover",
+        "view-cloud", "view-telegram", "avs-lightbox", "global-drop-overlay",
+        "cfg-tg-typing-mode", "tg-sticker-pack-input", "av-orig-btn", "wall-orig-btn"
     ):
         assert f'id="{dom_id}"' in ui_txt, f"Missing UI DOM element: {dom_id}"
     print("[PASS 6/7] ui_studio.html DOM & structure verified.")

@@ -4,9 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <link rel="icon" type="image/svg+xml" href="/logo.svg">
-<title>AetherVault Studio v6.8 Bluesky — Portable Local AI & OSWorld Workspace</title>
+<title>AetherVault Studio v7.1 Lamppost — Portable Local AI & OSWorld Workspace</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin="" defer></script>
+<link rel="stylesheet" href="/avs_ui/studio.css">
 <style>
   :root {
     --bg: #0d0e12;
@@ -244,7 +245,7 @@
   .issue-alert b { color: #fbbf24; }
   .issue-fix { color: #a7f3d0; font-size: 0.74rem; margin-top: 4px; }
 
-  /* Live Thought & File Inspection Box */
+  /* Live & Persistent Thought / Tool Process Box (Always Collapsible & Expandable) */
   .thought-details {
     background: color-mix(in srgb, var(--bg) 85%, var(--panel));
     border: 1px solid var(--border);
@@ -260,20 +261,80 @@
     font-weight: 600;
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 8px;
     user-select: none;
     outline: none;
+    list-style: none;
   }
+  .thought-details summary::-webkit-details-marker,
+  .thought-details summary::marker {
+    display: none;
+    content: "";
+  }
+  .thought-sum-left {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+    flex: 1;
+  }
+  .thought-chevron {
+    display: inline-block;
+    font-size: 0.72rem;
+    color: var(--accent-soft);
+    transition: transform 0.18s ease;
+    flex-shrink: 0;
+  }
+  .thought-details[open] .thought-chevron {
+    transform: rotate(90deg);
+  }
+  .thought-toggle-pill {
+    flex-shrink: 0;
+    font-size: 0.67rem;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 22%, var(--panel));
+    border: 1px solid color-mix(in srgb, var(--accent) 60%, var(--border));
+    color: var(--accent-soft);
+    white-space: nowrap;
+  }
+  .thought-details[open] .thought-toggle-pill .lbl-show { display: none; }
+  .thought-details:not([open]) .thought-toggle-pill .lbl-hide { display: none; }
   .thought-steps {
-    margin-top: 6px;
-    padding-top: 6px;
+    margin-top: 7px;
+    padding-top: 7px;
     border-top: 1px dashed var(--border);
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 5px;
     font-family: monospace;
     font-size: 0.72rem;
     color: #9ca3af;
+    max-height: 360px;
+    overflow-y: auto;
+  }
+  .thought-reasoning-card {
+    background: rgba(124, 58, 237, 0.09);
+    border: 1px solid rgba(167, 139, 250, 0.28);
+    border-left: 3px solid var(--accent-soft);
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-family: inherit;
+    font-size: 0.75rem;
+    color: #ddd6fe;
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.45;
+  }
+  .thought-reasoning-head {
+    font-size: 0.68rem;
+    font-weight: 700;
+    color: var(--accent-soft);
+    margin-bottom: 3px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
   }
   .wb-io-card {
     background: #07080d;
@@ -1115,7 +1176,7 @@
       <div style="overflow:hidden;">
         <div id="sidebar-ai-name" style="font-weight:700; font-size:1.0rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">Aether</div>
         <div style="font-size:0.71rem; color:var(--accent-soft); display:flex; align-items:center; gap:4px;">
-          <img src="/logo.svg" style="width:14px; height:14px; border-radius:3px;" alt=""> AVS v6.8
+          <img src="/logo.svg" style="width:14px; height:14px; border-radius:3px;" alt=""> AVS v7.1
         </div>
       </div>
     </div>
@@ -1125,6 +1186,11 @@
     </div>
   </div>
 
+  <div class="avs-view-nav" id="avs-view-nav">
+    <button class="avs-view-btn active" data-view="chat" onclick="switchMainView('chat')" title="Interactive AI Chat"><span>💬</span><span>Chat</span></button>
+    <button class="avs-view-btn" data-view="cloud" onclick="switchMainView('cloud')" title="Nextcloud-style Vault Cloud &amp; Roku/VLC DLNA"><span>☁️</span><span>Cloud</span></button>
+    <button class="avs-view-btn" data-view="telegram" onclick="switchMainView('telegram')" title="Read-Only Telegram Mirror (+ Fork to Web Chat)"><span>✈️</span><span>Telegram</span></button>
+  </div>
   <div class="session-list" id="session-list"></div>
 
   <div class="sidebar-footer">
@@ -1135,6 +1201,7 @@
     <div style="display:flex; gap:5px;">
       <button class="secondary small-btn" style="flex:1;" onclick="openSpecPulseModal()" title="Open SpecPulse 60-FPS Hardware Monitor & Benchmark">📊 SpecPulse</button>
       <button class="secondary small-btn" style="flex:1;" onclick="openStudioModal('tab-terminal')" title="Open Web Terminal & GitHub OTA Updater">💻 Terminal</button>
+      <button class="secondary small-btn" style="flex:1;" onclick="openStudioModal('tab-commands')" title="Open Searchable Commands Cheat Sheet">⌨️ Cmds</button>
       <button class="secondary small-btn" style="flex:1;" data-i18n="btn_manual" onclick="openStudioModal('tab-manual')">📖 Manual</button>
     </div>
     <div style="display:flex; gap:5px;">
@@ -1173,12 +1240,73 @@
       <option value="en">🌐 EN</option>
       <option value="es">🌐 ES</option>
     </select>
+    <button class="secondary small-btn" id="desktop-drawer-toggle-btn" onclick="toggleDesktopStudioDrawer()" title="Collapse or expand right Studio Controls for a calm Claude/Gemini canvas">🎛️ Hide Controls</button>
     <button class="mobile-nav-btn" onclick="toggleMobileSidebar('control-sidebar')">🎛️ Studio</button>
   </div>
 
   <div id="chat-box"></div>
 
-  <div id="attach-bar">
+  <div id="view-cloud" class="avs-main-view">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        <h2 style="margin:0;font-size:1.1rem;color:#fff;">☁️ Vault Cloud &amp; LAN Media Server</h2>
+        <span class="gear-pill" id="cloud-dlna-status-pill">📺 DLNA OFF (0% CPU)</span>
+        <button class="help-q-btn" onclick="showQuickTip('Vault Cloud & Roku/VLC DLNA', 'Browse & upload PC files from any phone on Wi-Fi, stream videos with HTTP 206 support (works on iPhone Safari & Android), or flip DLNA ON to watch on Roku Media Player & VLC — you can even ask your companion in chat to turn DLNA on or off!')" title="How Vault Cloud & DLNA work">?</button>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <label style="font-size:0.78rem;cursor:pointer;display:inline-flex;align-items:center;gap:5px;background:var(--panel);padding:5px 9px;border-radius:8px;border:1px solid var(--border);"><input type="checkbox" id="cloud-server-toggle" checked onchange="toggleCloudServices()"> ☁️ Cloud ON</label>
+        <label style="font-size:0.78rem;cursor:pointer;display:inline-flex;align-items:center;gap:5px;background:var(--panel);padding:5px 9px;border-radius:8px;border:1px solid var(--border);"><input type="checkbox" id="cloud-dlna-toggle" onchange="toggleCloudServices()"> 📺 DLNA (Roku/VLC)</label>
+        <button class="secondary small-btn" onclick="showPhoneConnectModal()">📱 Phone / Roku / VLC</button>
+        <button class="small-btn" onclick="switchMainView('chat')">💬 Back to Chat</button>
+      </div>
+    </div>
+    <div class="cloud-shell">
+      <div class="cloud-roots-pane">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+          <span style="font-size:0.74rem;font-weight:700;color:var(--accent-soft);text-transform:uppercase;">Shared Folders</span>
+          <button class="secondary small-btn" onclick="addCustomCloudRoot()" title="Mount any PC folder/drive for Cloud &amp; DLNA">+ Mount</button>
+        </div>
+        <div id="cloud-roots-list" style="display:flex;flex-direction:column;gap:4px;"></div>
+      </div>
+      <div class="cloud-main-pane">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+          <div id="cloud-breadcrumbs" style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;"></div>
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+            <input id="cloud-search-input" placeholder="🔍 Filter files..." style="width:165px;padding:5px 8px;font-size:0.76rem;" oninput="loadCloudDir(cloudState.rootId, cloudState.relPath)">
+            <input type="file" id="cloud-upload-input" multiple style="display:none" onchange="uploadCloudFilesList(this.files); this.value='';">
+            <button class="small-btn" onclick="document.getElementById('cloud-upload-input').click()">⬆️ Upload</button>
+            <button class="secondary small-btn" onclick="createCloudFolder()">📁+ Folder</button>
+            <button class="secondary small-btn" onclick="setCloudViewMode('grid')" title="Thumbnail Grid">⊞</button>
+            <button class="secondary small-btn" onclick="setCloudViewMode('list')" title="Detailed List">☰</button>
+          </div>
+        </div>
+        <div id="cloud-entries-box" class="cloud-grid"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="view-telegram" class="avs-main-view">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
+      <div>
+        <h2 id="tg-mirror-title" style="margin:0;font-size:1.1rem;color:#fff;">✈️ Telegram Mirror (Read-Only)</h2>
+        <div style="font-size:0.75rem;color:#9ca3af;">Telegram bot conversations stay neatly separated from your interactive desktop chats.</div>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        <button class="small-btn" onclick="forkActiveTelegramChat()" title="Clone this Telegram conversation into an interactive Web Chat">↗️ Fork to Web Chat</button>
+        <button class="secondary small-btn" onclick="openStudioModal('tab-integrations')">⚙️ Bot &amp; Stickers Setup</button>
+        <button class="secondary small-btn" onclick="switchMainView('chat')">💬 Back to Chat</button>
+      </div>
+    </div>
+    <div class="cloud-shell">
+      <div class="cloud-roots-pane">
+        <div style="font-size:0.74rem;font-weight:700;color:var(--accent-soft);text-transform:uppercase;margin-bottom:4px;">Telegram Threads</div>
+        <div id="tg-mirror-list" style="display:flex;flex-direction:column;gap:4px;"></div>
+      </div>
+      <div class="cloud-main-pane" id="tg-mirror-feed" style="overflow-y:auto;"></div>
+    </div>
+  </div>
+
+  <div id="attach-bar" style="display:none;">
     <span id="attach-label">📎 Attached: none</span>
     <span class="del-btn" onclick="clearAttachment()">✖ Remove</span>
   </div>
@@ -1191,29 +1319,58 @@
     </div>
   </div>
 
-  <div id="input-bar">
-    <input type="file" id="attach-input" accept=".txt,.md,.py,.json,.csv,.pdf,.png,.jpg,.jpeg,.webp" style="display:none" onchange="handleAttachment(this)">
-    <button class="secondary" onclick="document.getElementById('attach-input').click()" title="Attach PDF, Code, Text, or Image">📎</button>
-    <button class="secondary" onclick="triggerOSWorldScreen()" title="OSWorld: Capture Desktop Screenshot">🖥️</button>
-    <button class="secondary" onclick="triggerImageGen()" title="Image Manager: Generate Artwork (Cashier->Manager Swap)">🎨</button>
-    <button class="secondary" onclick="triggerMusicGen()" title="Music Manager: Compose Audio/Synth Track (Cashier->Manager Swap)">🎵</button>
-    <button class="secondary" id="mic-btn" onclick="toggleVoiceInput()" title="Voice Input">🎤</button>
-    <button class="secondary" id="tts-btn" onclick="toggleTTS()" title="Toggle Offline Neural / Studio Voice Readout">🔊 OFF</button>
-    <select id="voice-select" onchange="changeVoiceProfile(this.value)" title="Select Offline Neural Voice Profile" style="max-width:148px; font-size:0.75rem; padding:6px;">
-      <option value="af_nicole_river" selected>🎙️ Female Voice 3 (Indie)</option>
-      <option value="af_bella">🎙️ Female Voice 1 (Warm)</option>
-      <option value="af_sarah">🎙️ Female Voice 2 (Clear)</option>
-      <option value="bf_emma">🎙️ Female Voice 4 (British)</option>
-      <option value="am_michael">🎙️ Male Voice 1 (Steady)</option>
-      <option value="am_puck">🎙️ Male Voice 2 (Witty)</option>
-      <option value="bm_george">🎙️ Male Voice 3 (British)</option>
-      <option value="ef_dora">🎙️ Español (Femenina)</option>
-      <option value="em_alex">🎙️ Español (Masculina)</option>
-    </select>
-    <textarea id="user-input" rows="1" spellcheck="true" lang="en" placeholder="Send a message... (Enter to send, Shift+Enter for new line, Ctrl+V or Drop file)" onkeydown="handleChatInputKeydown(event)" oninput="autoResizeChatInput(this)"></textarea>
-    <button class="secondary" id="spellcheck-btn" onclick="runInputSpellcheck()" title="Check spelling (Offline & Lore-Safe)">✨</button>
-    <button id="stop-btn" class="stop-btn" data-i18n="btn_stop" onclick="stopGeneration()" title="Immediately Stop Generation">⏹️ Stop</button>
-    <button id="send-btn" data-i18n="btn_send" onclick="sendMessage()">Send</button>
+  <div id="leo-composer-wrap">
+    <div id="leo-composer">
+      <input type="file" id="attach-input" multiple accept=".txt,.md,.py,.json,.csv,.pdf,.png,.jpg,.jpeg,.webp,.gif,.avif" style="display:none" onchange="handleAttachment(this)">
+      <div class="leo-popover" id="leo-skills-popover">
+        <div class="leo-pop-scroll" id="leo-skills-scroll"></div>
+        <div class="leo-pop-footer">
+          <button class="secondary small-btn" style="width:100%;" onclick="createCustomSkillPrompt()">+ New Quick Action / Skill</button>
+        </div>
+      </div>
+      <div class="leo-popover" id="leo-attach-popover" style="left:42px; width:290px;">
+        <div class="leo-pop-scroll">
+          <div class="leo-pop-cat">Attach &amp; Media</div>
+          <div class="leo-pop-item" onclick="document.getElementById('attach-input').click(); toggleLeoPopover('leo-attach-popover');"><span>📎 Upload Images, PDFs or Code</span><span style="color:#9ca3af;font-size:0.7rem;">Multi</span></div>
+          <div class="leo-pop-item" onclick="switchMainView('cloud'); toggleLeoPopover('leo-attach-popover');"><span>☁️ Pick from Vault Cloud</span><span style="color:#38bdf8;font-size:0.7rem;">Drive</span></div>
+          <div class="leo-pop-item" onclick="triggerOSWorldScreen(); toggleLeoPopover('leo-attach-popover');"><span>🖥️ Capture Desktop Screenshot</span></div>
+          <div class="leo-pop-item" onclick="triggerImageGen(); toggleLeoPopover('leo-attach-popover');"><span>🎨 Generate Artwork</span></div>
+          <div class="leo-pop-item" onclick="triggerMusicGen(); toggleLeoPopover('leo-attach-popover');"><span>🎵 Compose Audio / Synth</span></div>
+          <div class="leo-pop-cat">Voice &amp; Writing</div>
+          <div class="leo-pop-item" onclick="toggleVoiceInput(); toggleLeoPopover('leo-attach-popover');"><span id="mic-btn">🎤 Voice Microphone Input</span></div>
+          <div class="leo-pop-item" onclick="toggleTTS();"><span id="tts-btn">🔊 OFF</span><span style="color:#9ca3af;font-size:0.7rem;">Toggle TTS</span></div>
+          <div class="leo-pop-item" onclick="runInputSpellcheck(); toggleLeoPopover('leo-attach-popover');"><span id="spellcheck-btn">✨ Offline Lore-Safe Spellcheck</span></div>
+          <div style="padding:6px 10px;">
+            <select id="voice-select" onchange="changeVoiceProfile(this.value)" title="Select Offline Neural Voice Profile" style="width:100%; font-size:0.75rem; padding:5px;">
+              <option value="af_nicole_river" selected>🎙️ Female Voice 3 (Indie)</option>
+              <option value="af_bella">🎙️ Female Voice 1 (Warm)</option>
+              <option value="af_sarah">🎙️ Female Voice 2 (Clear)</option>
+              <option value="bf_emma">🎙️ Female Voice 4 (British)</option>
+              <option value="am_michael">🎙️ Male Voice 1 (Steady)</option>
+              <option value="am_puck">🎙️ Male Voice 2 (Witty)</option>
+              <option value="bm_george">🎙️ Male Voice 3 (British)</option>
+              <option value="ef_dora">🎙️ Español (Femenina)</option>
+              <option value="em_alex">🎙️ Español (Masculina)</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div id="composer-media-tray"></div>
+      <textarea id="user-input" rows="1" spellcheck="true" lang="en" placeholder="Message Aether... (Enter to send, Shift+Enter newline, Ctrl+V or drop files anywhere)" onkeydown="handleChatInputKeydown(event)" oninput="autoResizeChatInput(this)"></textarea>
+      <div class="leo-bottom-row">
+        <div class="leo-left-actions">
+          <button class="leo-icon-btn" id="leo-slash-btn" onclick="toggleLeoPopover('leo-skills-popover', event)" title="Quick Actions &amp; Custom /Skills (Brave Leo style)">/</button>
+          <button class="leo-icon-btn" id="leo-attach-btn" onclick="toggleLeoPopover('leo-attach-popover', event)" title="Attach Media, Vault Cloud, Screenshot, Art &amp; Voice">📎</button>
+          <button class="leo-icon-btn" onclick="document.getElementById('attach-input').click()" title="Quick Upload Files or Full-Res Images">+</button>
+        </div>
+        <div class="leo-right-actions">
+          <button class="leo-pill-btn" id="leo-model-pill" onclick="openStudioModal('tab-smartapi')" title="Switch Brain / Smart API / Local Model">Automatic ▾</button>
+          <button class="leo-pill-btn" id="leo-mode-pill" onclick="toggleWorkspaceMode()" title="Click to toggle Assistant &amp; Workbench vs. Roleplay &amp; Lore">🛠️ Assistant</button>
+          <button id="stop-btn" class="stop-btn" data-i18n="btn_stop" onclick="stopGeneration()" title="Immediately Stop Generation">⏹️ Stop</button>
+          <button id="send-btn" data-i18n="btn_send" onclick="sendMessage()" title="Send Message">↑</button>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1437,7 +1594,7 @@
 <div class="modal-backdrop" id="studio-modal">
   <div class="modal-window">
     <div class="modal-top">
-      <strong style="font-size:0.95rem; display:flex; align-items:center; gap:8px;"><img src="/logo.svg" style="width:24px; height:24px;" alt="AVS"> AetherVault Studio v6.8 Bluesky — Configuration, Cropper & Diagnostics</strong>
+      <strong style="font-size:0.95rem; display:flex; align-items:center; gap:8px;"><img src="/logo.svg" style="width:24px; height:24px;" alt="AVS"> AetherVault Studio v7.1 Lamppost — Configuration, Cropper & Diagnostics</strong>
       <div style="display:flex; align-items:center; gap:8px;"><span class="gear-pill" id="modal-hb-pill" style="font-size:0.7rem;" title="Live Server & Download Status"><span class="hb-dot" id="modal-hb-dot"></span><span id="modal-hb-text">💓 Alive</span></span><button class="secondary small-btn" onclick="closeStudioModal()">✖ Close</button></div>
     </div>
 
@@ -1448,6 +1605,7 @@
       <button class="tab-btn" onclick="switchModalTab('tab-smartapi', this)">☁️ Smart API & BYOK Keys</button>
       <button class="tab-btn" data-i18n="tab_integrations" onclick="switchModalTab('tab-integrations', this)">🔌 Bridges, Language & Voice</button>
       <button class="tab-btn" onclick="switchModalTab('tab-terminal', this)">💻 Terminal &amp; OTA Update</button>
+      <button class="tab-btn" onclick="switchModalTab('tab-commands', this)">⌨️ Commands</button>
       <button class="tab-btn" onclick="switchModalTab('tab-diagnostics', this)">🛠️ Bugfixing, Sandbox & Self-Heal</button>
       <button class="tab-btn" data-i18n="tab_manual" onclick="switchModalTab('tab-manual', this)">📖 Visual Manual</button>
       <button class="tab-btn" onclick="switchModalTab('tab-about', this)"><svg viewBox="0 0 18 12" width="15" height="10" style="vertical-align:-1px; border-radius:2px; box-shadow:0 0 2px rgba(0,0,0,0.4);" aria-label="Argentina"><rect width="18" height="4" y="0" fill="#74ACDF"/><rect width="18" height="4" y="4" fill="#FFFFFF"/><rect width="18" height="4" y="8" fill="#74ACDF"/><circle cx="9" cy="6" r="1.4" fill="#F6B40E"/></svg> About & Copyrights</button>
@@ -1577,6 +1735,7 @@
             <div style="display:flex; gap:6px; margin-top:8px;">
               <button class="secondary small-btn" onclick="document.getElementById('avatar-upload-input').click()">📁 1. Choose Image</button>
               <button class="small-btn" id="av-apply-btn" onclick="uploadCroppedAsset('avatar')" disabled>✂️ 2. Crop & Apply Avatar</button>
+              <button class="secondary small-btn" id="av-orig-btn" onclick="uploadOriginalAsset('avatar')" disabled title="Save untouched original file with zero re-encoding">✨ Use Original</button>
               <button class="secondary small-btn" onclick="clearStudioAsset('avatar')">Clear</button>
             </div>
           </div>
@@ -1607,6 +1766,7 @@
             <div style="display:flex; gap:6px; margin-top:8px;">
               <button class="secondary small-btn" onclick="document.getElementById('wall-upload-input').click()">📁 1. Choose Image</button>
               <button class="small-btn" id="wall-apply-btn" onclick="uploadCroppedAsset('wallpaper')" disabled>✂️ 2. Crop & Apply Wallpaper</button>
+              <button class="secondary small-btn" id="wall-orig-btn" onclick="uploadOriginalAsset('wallpaper')" disabled title="Save untouched original full-res wallpaper with zero compression">✨ Use Original</button>
               <button class="secondary small-btn" onclick="clearStudioAsset('wallpaper')">Clear</button>
             </div>
           </div>
@@ -1893,20 +2053,132 @@
           </div>
         </div>
 
-        <div class="card" style="margin-bottom:12px;">
+        <div class="card" style="margin-bottom:12px; border-color:#f59e0b;">
           <div class="card-header">
-            <h3>📱 Telegram Bot Bridge</h3>
+            <h3>☁️ Cloud Lore Vault Sync (Nextcloud / WebDAV, Google Drive &amp; Mirror)</h3>
+            <span class="gear-pill" style="border-color:#f59e0b; color:#fde68a;">v7.1 Lamppost</span>
+          </div>
+          <p style="font-size:0.74rem; color:#9ca3af; margin:4px 0 8px 0;">
+            Swap &amp; sync <code>.pdf</code>, <code>.md</code>, and <code>.txt</code> lore files into <code>/priority_pdfs</code> from anywhere—complements Telegram direct file drops (send any file to your bot, or use <code>/files</code>, <code>/getfile</code>, <code>/sync</code>, <code>/pullurl</code>).
+          </p>
+          <div class="form-grid" style="margin-bottom:8px;">
+            <div class="form-group" style="margin-bottom:0;">
+              <label>Cloud Vault Provider</label>
+              <select id="cfg-cs-provider" onchange="updateCloudSyncFieldsVisibility()">
+                <option value="webdav">Nextcloud / OwnCloud / Generic WebDAV</option>
+                <option value="gdrive">Google Drive API v3 (Folder ID + Key/Token)</option>
+                <option value="local_mirror">Local Cloud-Synced Folder Mirror (Drive/Nextcloud/Syncthing)</option>
+              </select>
+            </div>
+            <div class="form-group" style="margin-bottom:0;">
+              <label>Target Subfolder inside <code>/priority_pdfs</code></label>
+              <input id="cfg-cs-subfolder" placeholder="e.g. cloud or lore">
+            </div>
+          </div>
+
+          <div id="cs-group-webdav" class="form-grid" style="margin-bottom:6px;">
+            <div class="form-group" style="margin-bottom:0; grid-column: 1 / -1;">
+              <label>Nextcloud / WebDAV Folder URL</label>
+              <input id="cfg-cs-webdav-url" placeholder="https://cloud.example.com/remote.php/dav/files/username/AVS_Lore">
+            </div>
+            <div class="form-group" style="margin-bottom:0;">
+              <label>WebDAV Username</label>
+              <input id="cfg-cs-webdav-user" placeholder="username">
+            </div>
+            <div class="form-group" style="margin-bottom:0;">
+              <label>WebDAV App Password</label>
+              <input type="password" id="cfg-cs-webdav-pass" placeholder="App password (not main password)">
+            </div>
+          </div>
+
+          <div id="cs-group-gdrive" class="form-grid" style="display:none; margin-bottom:6px;">
+            <div class="form-group" style="margin-bottom:0; grid-column: 1 / -1;">
+              <label>Google Drive Folder ID (or paste full folder link)</label>
+              <input id="cfg-cs-gdrive-folder" placeholder="1AbCdEfGhIjKlMnOpQrStUvWxYz">
+            </div>
+            <div class="form-group" style="margin-bottom:0;">
+              <label>Google API Key (Shared Folder Pull)</label>
+              <input type="password" id="cfg-cs-gdrive-key" placeholder="AIza...">
+            </div>
+            <div class="form-group" style="margin-bottom:0;">
+              <label>OAuth Bearer Token (Private Pull &amp; Push)</label>
+              <input type="password" id="cfg-cs-gdrive-token" placeholder="ya29... (optional)">
+            </div>
+          </div>
+
+          <div id="cs-group-mirror" class="form-group" style="display:none; margin-bottom:6px;">
+            <label>Local Synced Folder Path (e.g. <code>G:\My Drive\AVS_Lore</code> or <code>~/Nextcloud/Lore</code>)</label>
+            <input id="cfg-cs-mirror-path" placeholder="G:/My Drive/AVS_Lore">
+          </div>
+
+          <div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:6px;">
+            <button class="small-btn" onclick="runCloudLoreSync('pull')">⬇️ Pull into Knowledge Tree</button>
+            <button class="secondary small-btn" onclick="runCloudLoreSync('push')">⬆️ Push Local to Cloud</button>
+            <button class="secondary small-btn" onclick="runCloudLoreSync('both')">⇄ Two-Way Sync</button>
+          </div>
+
+          <div style="display:flex; gap:6px; margin-top:8px; padding-top:8px; border-top:1px dashed var(--border);">
+            <input id="cs-quick-url-input" placeholder="🔗 1-Click Pull: Paste Google Doc, Google Drive file, or raw .md/.txt/.pdf link..." style="flex:1; font-size:0.76rem;">
+            <button class="small-btn" onclick="pullQuickCloudUrl()">🔗 Pull Link</button>
+          </div>
+          <div id="cs-status-box" style="display:none; font-size:0.74rem; padding:7px 9px; border-radius:6px; background:var(--bg); border:1px solid var(--border); margin-top:6px; line-height:1.45;"></div>
+        </div>
+
+        <div class="card" style="margin-bottom:12px; border-color:#38bdf8;">
+          <div class="card-header">
+            <h3 style="display:flex;align-items:center;gap:6px;">✈️ Guided Telegram Bot Setup, Typing Animations &amp; Stickers <button class="help-q-btn" onclick="showQuickTip('Zero-Manual Telegram Setup', '1) Create a bot with @BotFather and paste its token. 2) Click Test & Connect to verify live. 3) Click Detect My Chat ID and tap /start in Telegram to lock the bot to only you! Use /menu in Telegram for the Argo-style compact switcher.')" title="Quick walkthrough">?</button></h3>
             <label style="font-size:0.78rem; cursor:pointer;"><input type="checkbox" id="cfg-tg-enabled"> Enable Bot Polling</label>
+          </div>
+          <div style="font-size:0.74rem; color:#9ca3af; margin:4px 0 8px 0;">
+            Step 1: Open <a href="https://t.me/BotFather" target="_blank" style="color:#38bdf8;">@BotFather</a> → <code>/newbot</code> → paste token below &amp; test. Step 2: Detect &amp; lock your Chat ID in 1 click. Step 3: Enjoy native typing animations, Argo-style chat menus &amp; stickers!
           </div>
           <div class="form-grid">
             <div class="form-group">
-              <label>Telegram Bot Token (from @BotFather)</label>
-              <input type="password" id="cfg-tg-token" placeholder="123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ">
+              <label>1. Telegram Bot Token (from @BotFather)</label>
+              <div style="display:flex;gap:5px;">
+                <input type="password" id="cfg-tg-token" placeholder="123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ" style="flex:1;">
+                <button class="small-btn" onclick="testTelegramBotToken()">🔌 Test</button>
+              </div>
             </div>
             <div class="form-group">
-              <label>Allowed Telegram Chat ID (Optional Security Lock)</label>
-              <input id="cfg-tg-chatid" placeholder="Leave blank first, send /start to see your ID">
+              <label>2. Allowed Chat ID (Auto-Detect &amp; Lock to Only You)</label>
+              <div style="display:flex;gap:5px;">
+                <input id="cfg-tg-chatid" placeholder="Click Detect then send /start" style="flex:1;">
+                <button class="secondary small-btn" onclick="detectTelegramChatId()">🎯 Detect ID</button>
+              </div>
             </div>
+            <div class="form-group" style="margin-bottom:0;">
+              <label>3. Live Typing Animation Style (<code>sendChatAction</code>)</label>
+              <select id="cfg-tg-typing-mode">
+                <option value="native">✨ Pure Native Animations (typing / sending photo / voice — Cleanest)</option>
+                <option value="verbose">📋 Verbose Rolling Status Card + Typing Animation</option>
+              </select>
+            </div>
+            <div class="form-group" style="margin-bottom:0;">
+              <label>Optional HTTPS Mini App URL (Advanced)</label>
+              <input id="cfg-tg-miniapp" placeholder="https://... (optional cloudflared URL)">
+            </div>
+          </div>
+          <div id="tg-wizard-status" style="display:none; font-size:0.74rem; padding:7px 9px; border-radius:6px; background:var(--bg); border:1px solid var(--border); margin-top:6px;"></div>
+          <div style="margin-top:10px; padding-top:10px; border-top:1px dashed var(--border);">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
+              <strong style="font-size:0.78rem;color:var(--accent-soft);">🎭 Emotion-Mapped Telegram Stickers (Anti-Spam Cooldown)</strong>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                <label style="font-size:0.74rem;cursor:pointer;"><input type="checkbox" id="cfg-tg-stickers-enabled" checked onchange="saveTelegramStickersUI()"> Enable Stickers</label>
+                <select id="cfg-tg-sticker-cooldown" onchange="saveTelegramStickersUI()" style="font-size:0.72rem;padding:3px 6px;">
+                  <option value="0">Cooldown: Off</option>
+                  <option value="5">Rare (1 per 5 turns)</option>
+                  <option value="3" selected>Balanced (1 per 3 turns)</option>
+                  <option value="2">Expressive (1 per 2 turns)</option>
+                </select>
+              </div>
+            </div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px;">
+              <input id="tg-sticker-pack-input" placeholder="Paste t.me/addstickers/PackName (or pack name)..." style="flex:1;min-width:180px;font-size:0.76rem;">
+              <button class="small-btn" onclick="importTelegramStickerPack()">📥 Import Pack</button>
+              <button class="secondary small-btn" onclick="armTelegramStickerCapture()">🎯 Capture Next Sticker</button>
+            </div>
+            <div id="tg-stickers-list" style="max-height:130px;overflow-y:auto;"></div>
           </div>
         </div>
 
@@ -1981,7 +2253,7 @@
         <div class="card" style="margin-bottom:12px; border-color:#10b981;">
           <div class="card-header">
             <h3>🔄 GitHub OTA Updater &amp; Remote Reload (EnZeeeRu/AetherVault-Studio)</h3>
-            <span class="gear-pill" id="ota-version-pill" style="border-color:#10b981; color:#a7f3d0;">v6.8 Bluesky</span>
+            <span class="gear-pill" id="ota-version-pill" style="border-color:#10b981; color:#a7f3d0;">v7.1 Lamppost</span>
           </div>
           <p style="font-size:0.75rem; color:#9ca3af; margin:4px 0 8px 0;">
             Push an update to GitHub from anywhere, then tap <b>Pull GitHub Update</b> on your phone or PC for commit-pinned GitHub Tree Sync (ETag 304 + Python syntax gate, CRLF-safe, zero API token needed) without touching your memories, models, or chats.
@@ -2006,7 +2278,7 @@
               <button class="secondary small-btn" onclick="document.getElementById('web-term-out').innerText=''">Clear</button>
             </div>
           </div>
-          <pre id="web-term-out" class="debug-pre" style="height:220px; max-height:240px; background:#05070b; color:#38bdf8; font-size:0.75rem; line-height:1.45;">AetherVault Studio v6.8 Bluesky Web Terminal Ready. Type /help for commands.</pre>
+          <pre id="web-term-out" class="debug-pre" style="height:220px; max-height:240px; background:#05070b; color:#38bdf8; font-size:0.75rem; line-height:1.45;">AetherVault Studio v7.1 Lamppost Web Terminal Ready. Type /help for commands.</pre>
           <div style="display:flex; gap:6px; margin-top:8px;">
             <input id="web-term-input" placeholder="Enter command (e.g. /help, /status, /specs, /py print(2+2), /update)..." style="flex:1; font-family:Consolas,monospace; font-size:0.8rem;" onkeydown="if(event.key==='Enter') runWebTerminalCmd()">
             <button class="small-btn" onclick="runWebTerminalCmd()">Run</button>
@@ -2020,6 +2292,23 @@
             <div>• <b>Anywhere via Telegram (Zero Port Forwarding):</b> Paste your <code>@BotFather</code> token in <b>Integrations</b>—chat &amp; trigger tools from cellular data anywhere in the world.</div>
             <div>• <b>Full Web UI Anywhere (Private HTTPS Tunnel):</b> Run <code>cloudflared tunnel --url http://127.0.0.1:8000</code> (or free <b>Tailscale</b> on PC + Phone) to access the full Studio &amp; Terminal UI securely from anywhere without opening router ports.</div>
           </div>
+        </div>
+      </div>
+
+      <!-- TAB 4.8: SEARCHABLE COMMANDS CHEAT SHEET (/help, TELEGRAM, WORKBENCH & HOTKEYS) -->
+      <div class="tab-pane" id="tab-commands">
+        <div class="card" style="margin-bottom:12px; border-color:var(--accent);">
+          <div class="card-header">
+            <h3>⌨️ AetherVault Studio v7.1 Lamppost — Commands &amp; Shortcuts Cheat Sheet</h3>
+            <span class="gear-pill" id="cmd-count-pill">Ready</span>
+          </div>
+          <p style="font-size:0.75rem; color:#9ca3af; margin:4px 0 8px 0;">
+            Quick reference for every Web Terminal <code>/help</code> command, Telegram Bot slash command, Python Workbench <code>vault.*</code> call, and Studio keyboard shortcut. Click <b>📋 Copy</b> or <b>▶️ Run</b> on any terminal command!
+          </p>
+          <input id="commands-search-input" placeholder="🔍 Filter commands (e.g. /thought, /update, /unload, spotify, weather, hotkey)..." style="width:100%;" oninput="filterCommandsSheet(this.value)">
+        </div>
+        <div id="commands-sheet-container" style="display:flex; flex-direction:column; gap:10px;">
+          <div style="color:#9ca3af; font-size:0.78rem;">Loading command catalog...</div>
         </div>
       </div>
 
@@ -2095,7 +2384,7 @@ print("Sandbox working dir:", os.getcwd())</textarea>
           <div style="display:flex; align-items:center; gap:10px;">
             <img src="/logo.svg" style="width:42px; height:42px; flex-shrink:0;" alt="AVS">
             <div>
-              <h3 data-i18n="manual_title" style="margin:0;">📖 AetherVault Studio v6.8 Bluesky — Visual Interactive Manual</h3>
+              <h3 data-i18n="manual_title" style="margin:0;">📖 AetherVault Studio v7.1 Lamppost — Visual Interactive Manual</h3>
               <div data-i18n="manual_subtitle" style="font-size:0.74rem; color:#cbd5e1; margin-top:3px;">
                 Complete illustrated guide with SVG diagrams, Workbench cheat sheets &amp; troubleshooting — also indexed into your AI via <code>[[SELF:manual|...]]</code>!
               </div>
@@ -2113,15 +2402,99 @@ print("Sandbox working dir:", os.getcwd())</textarea>
         <div id="manual-sections-box" style="display:flex; flex-direction:column; gap:12px;"></div>
       </div>
 
-      <!-- TAB 6: ABOUT, CREDITS & COPYRIGHT REGISTRY -->
+      <!-- TAB 6: STYLIZED SVG-ILLUSTRATED ABOUT, RELEASE EMBLEM & COPYRIGHT REGISTRY -->
       <div class="tab-pane" id="tab-about">
-        <div class="credit-banner">
-          <div style="display:flex; justify-content:center; margin-bottom:8px;"><img src="/logo.svg" style="width:76px; height:76px;" alt="AVS Logo"></div><h2 style="margin:0 0 6px 0; color:#fff;">AetherVault Studio v6.8 Bluesky (AVS)</h2>
-          <div style="font-size:0.92rem; font-weight:600; color:var(--accent-soft);">
-            <svg viewBox="0 0 18 12" width="15" height="10" style="vertical-align:-1px; border-radius:2px; box-shadow:0 0 2px rgba(0,0,0,0.4);" aria-label="Argentina"><rect width="18" height="4" y="0" fill="#74ACDF"/><rect width="18" height="4" y="4" fill="#FFFFFF"/><rect width="18" height="4" y="8" fill="#74ACDF"/><circle cx="9" cy="6" r="1.4" fill="#F6B40E"/></svg> Made with ❤️ in Argentina by Enzeru, with the collaboration of Google Gemini.
+        <div class="credit-banner" style="position:relative; overflow:hidden; padding:18px 16px; background:radial-gradient(circle at 50% 0%, rgba(245,158,11,0.18), rgba(124,58,237,0.22) 48%, rgba(13,14,18,0.95) 100%);">
+          <!-- Subtle Starry Aurora SVG Backdrop -->
+          <svg viewBox="0 0 760 120" width="100%" height="100%" preserveAspectRatio="none" style="position:absolute; inset:0; opacity:0.32; pointer-events:none;" aria-hidden="true">
+            <defs>
+              <linearGradient id="abAurora" x1="0%" y1="0%" x2="100%" y2="0%">
+                <stop offset="0%" stop-color="#38bdf8" stop-opacity="0"/>
+                <stop offset="35%" stop-color="#8b5cf6" stop-opacity="0.7"/>
+                <stop offset="68%" stop-color="#f59e0b" stop-opacity="0.7"/>
+                <stop offset="100%" stop-color="#ec4899" stop-opacity="0"/>
+              </linearGradient>
+            </defs>
+            <path d="M0,78 Q190,22 380,62 T760,44 L760,120 L0,120 Z" fill="url(#abAurora)"/>
+            <circle cx="84" cy="24" r="1.8" fill="#e0f2fe"/><circle cx="195" cy="18" r="1.4" fill="#fde68a"/>
+            <circle cx="565" cy="22" r="1.6" fill="#e0f2fe"/><circle cx="672" cy="30" r="1.5" fill="#fde68a"/>
+          </svg>
+
+          <!-- Dual Crest Showcase: Studio Hex Logo + v7.1 Lamppost Release Emblem -->
+          <div style="position:relative; z-index:1; display:flex; justify-content:center; align-items:center; gap:18px; margin-bottom:10px; flex-wrap:wrap;">
+            <img src="/logo.svg" style="width:74px; height:74px; filter:drop-shadow(0 0 12px rgba(124,58,237,0.55));" alt="AetherVault Studio Logo">
+            <div style="display:flex; flex-direction:column; align-items:center; gap:3px;">
+              <span style="font-size:0.66rem; letter-spacing:1.6px; text-transform:uppercase; color:#fde68a; font-weight:700;">Release Emblem Edition</span>
+              <h2 style="margin:0; color:#fff; font-size:1.32rem; letter-spacing:0.3px;">AetherVault Studio v7.1</h2>
+              <span class="gear-pill" style="border-color:#f59e0b; color:#fef3c7; background:rgba(245,158,11,0.2); font-size:0.72rem; letter-spacing:0.9px;">🏮 CODENAME: LAMPPOST</span>
+            </div>
+            <img src="/emblem.svg" id="about-release-emblem" style="width:80px; height:80px; filter:drop-shadow(0 0 14px rgba(245,158,11,0.55));" alt="v7.1 Lamppost Release Emblem">
           </div>
-          <div style="font-size:0.75rem; color:#9ca3af; margin-top:4px;">
-            Standalone Open-Source Portable Local AI Environment • Reflex Fast-Gear • OSWorld Desktop Agent
+
+          <div style="position:relative; z-index:1; font-size:0.9rem; font-weight:600; color:#e0f2fe; display:inline-flex; align-items:center; gap:7px; padding:5px 12px; border-radius:999px; background:rgba(15,23,42,0.72); border:1px solid rgba(116,172,223,0.45);">
+            <svg viewBox="0 0 24 16" width="20" height="13" style="border-radius:2px; box-shadow:0 0 4px rgba(0,0,0,0.5);" aria-label="Argentina">
+              <rect width="24" height="5.33" y="0" fill="#74ACDF"/>
+              <rect width="24" height="5.34" y="5.33" fill="#FFFFFF"/>
+              <rect width="24" height="5.33" y="10.67" fill="#74ACDF"/>
+              <circle cx="12" cy="8" r="1.9" fill="#F6B40E"/>
+            </svg>
+            <span>Made with ❤️ in Argentina by <b>Enzeru (EnZeeeRu)</b>, in collaboration with Google Gemini.</span>
+          </div>
+          <div style="position:relative; z-index:1; font-size:0.74rem; color:#cbd5e1; margin-top:7px;">
+            100% Portable Local AI • Evergreen-Speed KV Core • Cloud Lore Vault Sync • Telegram File Drop • SpecPulse Telemetry
+          </div>
+        </div>
+
+        <!-- Inline SVG Visual Lineage & Dual-License Pillar Cards -->
+        <div class="card" style="margin-bottom:12px; padding:12px;">
+          <h3 style="margin-bottom:8px;">✨ Version Emblem Lineage &amp; Core Pillars</h3>
+          <svg viewBox="0 0 740 94" width="100%" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="AetherVault Studio Release Lineage">
+            <rect x="1" y="1" width="738" height="92" rx="10" fill="#090c16" stroke="#2b2e3d" stroke-width="1.2"/>
+            <line x1="70" y1="42" x2="670" y2="42" stroke="#334155" stroke-width="2.5" stroke-dasharray="5 4"/>
+            <!-- Node 1: Evergreen -->
+            <circle cx="95" cy="42" r="12" fill="#064e3b" stroke="#10b981" stroke-width="2"/>
+            <text x="95" y="46" text-anchor="middle" fill="#a7f3d0" font-size="9" font-weight="700" font-family="Segoe UI,sans-serif">5.0</text>
+            <text x="95" y="70" text-anchor="middle" fill="#a7f3d0" font-size="9.5" font-weight="700" font-family="Segoe UI,sans-serif">Evergreen</text>
+            <text x="95" y="83" text-anchor="middle" fill="#9ca3af" font-size="8" font-family="Segoe UI,sans-serif">3-File OTA &amp; SpecPulse</text>
+            <!-- Node 2: Bluesky -->
+            <circle cx="285" cy="42" r="12" fill="#0c4a6e" stroke="#38bdf8" stroke-width="2"/>
+            <text x="285" y="46" text-anchor="middle" fill="#bae6fd" font-size="9" font-weight="700" font-family="Segoe UI,sans-serif">6.8</text>
+            <text x="285" y="70" text-anchor="middle" fill="#7dd3fc" font-size="9.5" font-weight="700" font-family="Segoe UI,sans-serif">Bluesky</text>
+            <text x="285" y="83" text-anchor="middle" fill="#9ca3af" font-size="8" font-family="Segoe UI,sans-serif">AT Proto, i18n &amp; Guardrails</text>
+            <!-- Node 3: KV Core -->
+            <circle cx="475" cy="42" r="12" fill="#3b0764" stroke="#a855f7" stroke-width="2"/>
+            <text x="475" y="46" text-anchor="middle" fill="#e9d5ff" font-size="9" font-weight="700" font-family="Segoe UI,sans-serif">7.0</text>
+            <text x="475" y="70" text-anchor="middle" fill="#d8b4fe" font-size="9.5" font-weight="700" font-family="Segoe UI,sans-serif">KV Core</text>
+            <text x="475" y="83" text-anchor="middle" fill="#9ca3af" font-size="8" font-family="Segoe UI,sans-serif">Fast Prefix &amp; /thought</text>
+            <!-- Node 4: Lamppost (Current) -->
+            <circle cx="645" cy="42" r="16" fill="#78350f" stroke="#fbbf24" stroke-width="2.6"/>
+            <text x="645" y="46" text-anchor="middle" fill="#fef3c7" font-size="9.5" font-weight="800" font-family="Segoe UI,sans-serif">7.1</text>
+            <text x="645" y="72" text-anchor="middle" fill="#fde68a" font-size="10" font-weight="800" font-family="Segoe UI,sans-serif">Lamppost ★</text>
+            <text x="645" y="84" text-anchor="middle" fill="#fcd34d" font-size="8" font-family="Segoe UI,sans-serif">Cloud Sync &amp; Emblem Art</text>
+          </svg>
+
+          <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(210px, 1fr)); gap:8px; margin-top:10px;">
+            <div style="background:var(--bg); border:1px solid #10b981; border-radius:8px; padding:9px; display:flex; gap:9px; align-items:flex-start;">
+              <svg viewBox="0 0 36 36" width="32" height="32" style="flex-shrink:0;"><rect width="36" height="36" rx="8" fill="#064e3b"/><path d="M11 18l5 5 9-10" fill="none" stroke="#34d399" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <div>
+                <div style="font-size:0.78rem; font-weight:700; color:#6ee7b7;">MIT Open-Source Code</div>
+                <div style="font-size:0.71rem; color:#9ca3af; margin-top:2px;">Free to inspect, fork, mod &amp; self-host locally with zero vendor lock-in.</div>
+              </div>
+            </div>
+            <div style="background:var(--bg); border:1px solid #f59e0b; border-radius:8px; padding:9px; display:flex; gap:9px; align-items:flex-start;">
+              <svg viewBox="0 0 36 36" width="32" height="32" style="flex-shrink:0;"><rect width="36" height="36" rx="8" fill="#451a03"/><circle cx="18" cy="18" r="10" fill="none" stroke="#fbbf24" stroke-width="2.4"/><text x="18" y="21.5" text-anchor="middle" fill="#fde68a" font-size="10" font-weight="800" font-family="Segoe UI,sans-serif">CC</text></svg>
+              <div>
+                <div style="font-size:0.78rem; font-weight:700; color:#fde68a;">CC BY-NC 4.0 Art &amp; Docs</div>
+                <div style="font-size:0.71rem; color:#9ca3af; margin-top:2px;">Logo, Lamppost Emblem &amp; Manuals require attribution to Enzeru (non-commercial).</div>
+              </div>
+            </div>
+            <div style="background:var(--bg); border:1px solid #38bdf8; border-radius:8px; padding:9px; display:flex; gap:9px; align-items:flex-start;">
+              <svg viewBox="0 0 36 36" width="32" height="32" style="flex-shrink:0;"><rect width="36" height="36" rx="8" fill="#0c4a6e"/><path d="M18 7l10 4v7c0 6.5-4.3 10.7-10 12.5C12.3 28.7 8 24.5 8 18v-7l10-4z" fill="none" stroke="#38bdf8" stroke-width="2.4"/></svg>
+              <div>
+                <div style="font-size:0.78rem; font-weight:700; color:#7dd3fc;">Zero Telemetry Vault</div>
+                <div style="font-size:0.71rem; color:#9ca3af; margin-top:2px;">No analytics, no tracking, no phone-home. Flip Offline Mode to cut 100% traffic.</div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -2982,6 +3355,7 @@ function loadCropperFile(inputEl, type) {
       const indEl = document.getElementById(type === 'avatar' ? 'av-file-indicator' : 'wall-file-indicator');
       indEl.innerHTML = `✅ Selected: <b style="color:#a7f3d0;">${escapeHtml(file.name)}</b> (${img.width}x${img.height}px) — Adjust crop sliders below:`;
       document.getElementById(type === 'avatar' ? 'av-apply-btn' : 'wall-apply-btn').disabled = false;
+      const oBtn = document.getElementById(type === 'avatar' ? 'av-orig-btn' : 'wall-orig-btn'); if (oBtn) oBtn.disabled = false;
       renderCropPreview(type);
     };
     img.src = e.target.result;
@@ -3232,7 +3606,7 @@ async function runSystemSelfTest() {
   try {
     const res = await fetch('/diagnostics/selftest');
     const data = await res.json();
-    const lines = ['=== 🩺 AETHERVAULT v6.8 SELF-TEST REPORT ==='];
+    const lines = ['=== 🩺 AETHERVAULT v7.1 SELF-TEST REPORT ==='];
     (data.checks || []).forEach(c => {
       lines.push(`${c.ok ? '✅' : '⚠️'} ${c.system}: ${c.detail}`);
     });
@@ -3725,7 +4099,7 @@ async function refreshStatus() {
         document.getElementById('gdl-stats').innerText = `${d.percent}% (${d.downloaded_mb} / ${d.total_mb} MB) @ ${d.speed_mbps} MB/s | ETA: ${formatEta(d.eta_sec)} | Alive: ${d.elapsed_sec || 0}s`;
         document.getElementById('gdl-bar').style.width = `${Math.max(2, d.percent)}%`;
       }
-      document.title = `[⬇️ ${d.percent}% | ${d.speed_mbps} MB/s] AetherVault Studio v6.8 Bluesky`;
+      document.title = `[⬇️ ${d.percent}% | ${d.speed_mbps} MB/s] AetherVault Studio v7.1 Lamppost`;
       upsertPersistentToast(
         'dl_status',
         'toast-working',
@@ -3736,7 +4110,7 @@ async function refreshStatus() {
     } else {
       if (gdlHud) gdlHud.style.display = 'none';
       if (!data.loading_model && !data.generating) {
-        document.title = 'AetherVault Studio v6.8 Bluesky — Portable Local AI & OSWorld Workspace';
+        document.title = 'AetherVault Studio v7.1 Lamppost — Portable Local AI & OSWorld Workspace';
       }
       if (wasDownloading) {
         wasDownloading = false;
@@ -4026,6 +4400,7 @@ async function refreshStatus() {
       }
     }
 
+    if (!data.generating) {
     const memDiv = document.getElementById('mem-list');
     if (data.memories.length === 0) {
       memDiv.innerHTML = '<div style="color:#6b7280; font-size:0.76rem;">No active memory notes yet.</div>';
@@ -4049,6 +4424,7 @@ async function refreshStatus() {
         </div>
         <div class="pkg-desc">${escapeHtml(p.desc)}</div>
       </div>`).join('');
+    }
 
     if (data.debug) {
       const d = data.debug;
@@ -4107,9 +4483,12 @@ async function refreshStatus() {
       document.getElementById('debug-box').innerText = lines.join('\n');
     }
 
+    if (!data.generating) {
+    window.latestAllSessions = data.sessions || [];
+    const webSessions = (typeof window.filterWebSessionsOnly === 'function') ? window.filterWebSessionsOnly(data.sessions) : (data.sessions || []);
     const listDiv = document.getElementById('session-list');
     listDiv.innerHTML = '';
-    data.sessions.forEach(s => {
+    webSessions.forEach(s => {
       const item = document.createElement('div');
       item.className = 'session-item ' + (s.id === currentSessionId ? 'active' : '');
       const titleSpan = document.createElement('span');
@@ -4131,6 +4510,7 @@ async function refreshStatus() {
       item.onclick = () => { loadSession(s.id); closeAllMobileSidebars(); };
       listDiv.appendChild(item);
     });
+    }
 
     if (!initialized && data.sessions.length > 0) {
       initialized = true;
@@ -4205,6 +4585,19 @@ async function openStudioModal(tabId) {
   document.getElementById('cfg-tg-enabled').checked = Boolean(tg.enabled);
   document.getElementById('cfg-tg-token').value = tg.bot_token || '';
   document.getElementById('cfg-tg-chatid').value = tg.allowed_chat_id || '';
+  if (document.getElementById('cfg-tg-typing-mode')) document.getElementById('cfg-tg-typing-mode').value = tg.typing_mode || 'native';
+  if (document.getElementById('cfg-tg-miniapp')) document.getElementById('cfg-tg-miniapp').value = tg.miniapp_url || '';
+  const cs = cfg.cloud_sync || {};
+  if (document.getElementById('cfg-cs-provider')) document.getElementById('cfg-cs-provider').value = cs.provider || 'webdav';
+  if (document.getElementById('cfg-cs-subfolder')) document.getElementById('cfg-cs-subfolder').value = cs.subfolder || 'cloud';
+  if (document.getElementById('cfg-cs-webdav-url')) document.getElementById('cfg-cs-webdav-url').value = cs.webdav_url || '';
+  if (document.getElementById('cfg-cs-webdav-user')) document.getElementById('cfg-cs-webdav-user').value = cs.webdav_username || '';
+  if (document.getElementById('cfg-cs-webdav-pass')) document.getElementById('cfg-cs-webdav-pass').value = cs.webdav_password || '';
+  if (document.getElementById('cfg-cs-gdrive-folder')) document.getElementById('cfg-cs-gdrive-folder').value = cs.gdrive_folder_id || '';
+  if (document.getElementById('cfg-cs-gdrive-key')) document.getElementById('cfg-cs-gdrive-key').value = cs.gdrive_api_key || '';
+  if (document.getElementById('cfg-cs-gdrive-token')) document.getElementById('cfg-cs-gdrive-token').value = cs.gdrive_bearer_token || '';
+  if (document.getElementById('cfg-cs-mirror-path')) document.getElementById('cfg-cs-mirror-path').value = cs.local_mirror_path || '';
+  if (typeof updateCloudSyncFieldsVisibility === 'function') updateCloudSyncFieldsVisibility();
 
   const sp = cfg.spotify || {};
   document.getElementById('cfg-sp-id').value = sp.client_id || '';
@@ -4257,7 +4650,8 @@ async function openStudioModal(tabId) {
   if (document.getElementById('cfg-spellcheck-enabled')) document.getElementById('cfg-spellcheck-enabled').checked = cfg.spellcheck_enabled !== false;
   if (tabId === 'tab-about') loadAboutRegistry();
   if (tabId === 'tab-manual') loadManualTab();
-  if (tabId === 'tab-integrations') refreshLanguagePanel();
+  if (tabId === 'tab-commands') loadCommandsCheatSheet();
+  if (tabId === 'tab-integrations') { refreshLanguagePanel(); if (typeof loadTelegramStickersUI === 'function') loadTelegramStickersUI(); }
   if (tabId === 'tab-identity') setTimeout(initUserCardLeafletMap, 120);
 }
 
@@ -4273,7 +4667,8 @@ function switchModalTab(tabId, btnEl) {
   if (btnEl) btnEl.classList.add('active');
   if (tabId === 'tab-about') loadAboutRegistry();
   if (tabId === 'tab-manual') loadManualTab();
-  if (tabId === 'tab-integrations') refreshLanguagePanel();
+  if (tabId === 'tab-commands') loadCommandsCheatSheet();
+  if (tabId === 'tab-integrations') { refreshLanguagePanel(); if (typeof loadTelegramStickersUI === 'function') loadTelegramStickersUI(); }
   if (tabId === 'tab-identity') setTimeout(initUserCardLeafletMap, 120);
 }
 
@@ -4446,7 +4841,8 @@ async function authorizeSpotifyAfterAutoSave() {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
-      spotify: { client_id: cid, client_secret: csec, redirect_uri: 'http://127.0.0.1:8000/spotify_callback' }
+      cloud_sync: collectCloudSyncForm(),
+    spotify: { client_id: cid, client_secret: csec, redirect_uri: 'http://127.0.0.1:8000/spotify_callback' }
     })
   });
   window.open('/spotify/login', '_blank');
@@ -4503,9 +4899,84 @@ async function testMcpHandshake() {
   }
 }
 
+function updateCloudSyncFieldsVisibility() {
+  const prov = (document.getElementById('cfg-cs-provider') || {}).value || 'webdav';
+  const gDav = document.getElementById('cs-group-webdav');
+  const gDrv = document.getElementById('cs-group-gdrive');
+  const gMir = document.getElementById('cs-group-mirror');
+  if (gDav) gDav.style.display = (prov === 'webdav') ? 'grid' : 'none';
+  if (gDrv) gDrv.style.display = (prov === 'gdrive') ? 'grid' : 'none';
+  if (gMir) gMir.style.display = (prov === 'local_mirror') ? 'flex' : 'none';
+}
+
+function collectCloudSyncForm() {
+  return {
+    provider: (document.getElementById('cfg-cs-provider') || {}).value || 'webdav',
+    subfolder: ((document.getElementById('cfg-cs-subfolder') || {}).value || 'cloud').trim(),
+    webdav_url: ((document.getElementById('cfg-cs-webdav-url') || {}).value || '').trim(),
+    webdav_username: ((document.getElementById('cfg-cs-webdav-user') || {}).value || '').trim(),
+    webdav_password: ((document.getElementById('cfg-cs-webdav-pass') || {}).value || '').trim(),
+    gdrive_folder_id: ((document.getElementById('cfg-cs-gdrive-folder') || {}).value || '').trim(),
+    gdrive_api_key: ((document.getElementById('cfg-cs-gdrive-key') || {}).value || '').trim(),
+    gdrive_bearer_token: ((document.getElementById('cfg-cs-gdrive-token') || {}).value || '').trim(),
+    local_mirror_path: ((document.getElementById('cfg-cs-mirror-path') || {}).value || '').trim(),
+  };
+}
+
+async function runCloudLoreSync(direction) {
+  const box = document.getElementById('cs-status-box');
+  if (box) { box.style.display = 'block'; box.innerHTML = `⏳ Running Cloud Lore Vault sync (${escapeHtml(direction)})...`; }
+  try {
+    const res = await fetch('/api/cloud_sync/run', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ direction, cloud_sync: collectCloudSyncForm() })
+    });
+    const d = await res.json();
+    if (box) {
+      const details = [];
+      if (d.pulled && d.pulled.length) details.push(`⬇️ Pulled: ${escapeHtml(d.pulled.slice(0, 6).join(', '))}`);
+      if (d.pushed && d.pushed.length) details.push(`⬆️ Pushed: ${escapeHtml(d.pushed.slice(0, 6).join(', '))}`);
+      if (d.errors && d.errors.length) details.push(`⚠️ ${escapeHtml(d.errors.slice(0, 3).join(' | '))}`);
+      box.innerHTML = (d.ok ? '✅ ' : '⚠️ ') + `<b>${escapeHtml(d.message || d.error || 'Done')}</b>` + (details.length ? '<br>' + details.join('<br>') : '');
+    }
+    lastPdfStateHash = '';
+    refreshStatus();
+  } catch (e) {
+    if (box) box.innerHTML = `❌ <span style="color:#fca5a5;">${escapeHtml(String(e))}</span>`;
+  }
+}
+
+async function pullQuickCloudUrl() {
+  const inp = document.getElementById('cs-quick-url-input');
+  const box = document.getElementById('cs-status-box');
+  const url = (inp && inp.value || '').trim();
+  if (!url) return alert('Paste a Google Doc, Google Drive file, or raw .md/.txt/.pdf URL first!');
+  const sub = ((document.getElementById('cfg-cs-subfolder') || {}).value || 'cloud').trim();
+  if (box) { box.style.display = 'block'; box.innerHTML = '⏳ Pulling link into /priority_pdfs & indexing...'; }
+  try {
+    const res = await fetch('/api/cloud_sync/pull_url', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ url, subfolder: sub })
+    });
+    const d = await res.json();
+    if (box) {
+      box.innerHTML = d.ok
+        ? `✅ <b style="color:#a7f3d0;">${escapeHtml(d.message)}</b>`
+        : `⚠️ <span style="color:#fca5a5;">${escapeHtml(d.error || 'Pull failed')}</span>`;
+    }
+    if (d.ok && inp) inp.value = '';
+    lastPdfStateHash = '';
+    refreshStatus();
+  } catch (e) {
+    if (box) box.innerHTML = `❌ <span style="color:#fca5a5;">${escapeHtml(String(e))}</span>`;
+  }
+}
+
 async function sendBlueskyTestPost() {
   const box = document.getElementById('bsky-status-box');
-  const txt = prompt('Enter a Bluesky post (max 300 chars) to publish now:', 'Online from AetherVault Studio v6.8 Bluesky!');
+  const txt = prompt('Enter a Bluesky post (max 300 chars) to publish now:', 'Online from AetherVault Studio v7.1 Lamppost!');
   if (!txt || !txt.trim()) return;
   if (box) { box.style.display = 'block'; box.innerHTML = '⏳ Posting to Bluesky...'; }
   try {
@@ -4536,7 +5007,9 @@ async function saveIntegrationsConfig() {
     telegram: {
       enabled: document.getElementById('cfg-tg-enabled').checked,
       bot_token: document.getElementById('cfg-tg-token').value.trim(),
-      allowed_chat_id: document.getElementById('cfg-tg-chatid').value.trim()
+      allowed_chat_id: document.getElementById('cfg-tg-chatid').value.trim(),
+      typing_mode: (document.getElementById('cfg-tg-typing-mode') ? document.getElementById('cfg-tg-typing-mode').value : 'native'),
+      miniapp_url: (document.getElementById('cfg-tg-miniapp') ? document.getElementById('cfg-tg-miniapp').value.trim() : '')
     },
     bluesky: {
       enabled: document.getElementById('cfg-bsky-enabled') ? document.getElementById('cfg-bsky-enabled').checked : false,
@@ -4755,13 +5228,78 @@ async function startNewChat() {
   await loadSession(newId);
 }
 
+function buildThoughtItemEl(item) {
+  if (!item || typeof item !== 'object') return null;
+  if (item.kind === 'workbench_io') {
+    const ioCard = document.createElement('div');
+    ioCard.className = 'wb-io-card';
+    ioCard.innerHTML = `<div class="wb-io-code"><b>🐍 ${escapeHtml(item.tool || 'workbench')}:</b>\n${escapeHtml(item.code || '')}</div><div class="wb-io-out"><b>↳ Output:</b>\n${escapeHtml(item.output || '')}</div>`;
+    return ioCard;
+  }
+  if (item.kind === 'thought') {
+    const thCard = document.createElement('div');
+    thCard.className = 'thought-reasoning-card';
+    thCard.innerHTML = `<div class="thought-reasoning-head">🧠 ${escapeHtml(item.label || 'Reasoning')}</div><div>${escapeHtml(item.text || '')}</div>`;
+    return thCard;
+  }
+  const sItem = document.createElement('div');
+  const tTag = (item.t !== undefined && item.t !== null) ? `[${item.t}s] ` : '';
+  sItem.innerText = tTag + String(item.text || '');
+  return sItem;
+}
+
+function buildThoughtDetailsWidget(summaryText, traceItems = [], startOpen = false, showWave = false) {
+  const details = document.createElement('details');
+  details.className = 'thought-details';
+  if (startOpen) details.open = true;
+  details.innerHTML = `
+    <summary>
+      <span class="thought-sum-left">
+        <span class="thought-chevron">▸</span>
+        <div class="dot-wave thought-wave" style="display:${showWave ? 'inline-flex' : 'none'};"><span></span><span></span><span></span></div>
+        <span class="thought-summary-label">${escapeHtml(summaryText)}</span>
+      </span>
+      <span class="thought-toggle-pill"><span class="lbl-show">▼ Show</span><span class="lbl-hide">▲ Collapse</span></span>
+    </summary>
+    <div class="thought-steps"></div>
+  `;
+  const stepsBox = details.querySelector('.thought-steps');
+  (traceItems || []).forEach(it => {
+    const el = buildThoughtItemEl(it);
+    if (el) stepsBox.appendChild(el);
+  });
+  return details;
+}
+
+function summarizeTraceCounts(traceObj) {
+  const items = (traceObj && Array.isArray(traceObj.items)) ? traceObj.items : [];
+  let steps = 0, tools = 0, thoughts = 0;
+  items.forEach(it => {
+    if (it.kind === 'workbench_io') tools++;
+    else if (it.kind === 'thought') thoughts++;
+    else steps++;
+  });
+  const parts = [];
+  if (steps) parts.push(`${steps} step${steps === 1 ? '' : 's'}`);
+  if (tools) parts.push(`${tools} tool${tools === 1 ? '' : 's'}`);
+  if (thoughts) parts.push(`${thoughts} thought${thoughts === 1 ? '' : 's'}`);
+  const sec = (traceObj && traceObj.elapsed_sec !== undefined) ? `${traceObj.elapsed_sec}s` : '';
+  return `⚡ ${sec ? 'Completed in ' + sec : 'Thought Process'}${parts.length ? ' (' + parts.join(' · ') + ')' : ''}`;
+}
+
 async function loadSession(sessionId) {
   currentSessionId = sessionId;
   const res = await fetch(`/session/${sessionId}`);
   const data = await res.json();
   const box = document.getElementById('chat-box');
   box.innerHTML = '';
-  data.messages.forEach(m => appendBubble(m.role, m.content, null, null, m.id));
+  (data.messages || []).forEach(m => {
+    const tr = m.thought_trace || null;
+    const imgU = (tr && tr.image_url) ? tr.image_url : null;
+    const audU = (tr && tr.audio_url) ? tr.audio_url : null;
+    appendBubble(m.role, m.content, imgU, audU, m.id, tr);
+  });
+  if (typeof window.renderWelcomeStageIfEmpty === 'function') window.renderWelcomeStageIfEmpty();
   refreshStatus();
 }
 
@@ -4781,7 +5319,7 @@ async function deleteSession(e, sessionId) {
   }
 }
 
-function appendBubble(role, text, imgUrl = null, audioUrl = null, msgId = null) {
+function appendBubble(role, text, imgUrl = null, audioUrl = null, msgId = null, thoughtTrace = null) {
   const box = document.getElementById('chat-box');
   const row = document.createElement('div');
   row.className = 'msg-row ' + (role === 'user' ? 'user-row' : 'assistant-row');
@@ -4797,7 +5335,17 @@ function appendBubble(role, text, imgUrl = null, audioUrl = null, msgId = null) 
 
   const div = document.createElement('div');
   div.className = 'msg ' + role;
-  div.innerHTML = renderMarkdownAndArtifacts(text);
+
+  if (role === 'assistant' && thoughtTrace && Array.isArray(thoughtTrace.items) && thoughtTrace.items.length > 0) {
+    const detailsEl = buildThoughtDetailsWidget(summarizeTraceCounts(thoughtTrace), thoughtTrace.items, false, false);
+    div.appendChild(detailsEl);
+  }
+
+  const bodyEl = document.createElement('div');
+  bodyEl.className = 'msg-reply-text';
+  bodyEl.innerHTML = renderMarkdownAndArtifacts(text);
+  div.appendChild(bodyEl);
+
   const actBar = buildBubbleActionsBar(role, text, msgId);
   div.appendChild(actBar);
   if (imgUrl) {
@@ -4847,33 +5395,33 @@ async function sendMessage() {
 
   const botBubble = document.createElement('div');
   botBubble.className = 'msg assistant';
-  botBubble.innerHTML = `
-    <div id="active-issue-slot"></div>
-    <details class="thought-details">
-      <summary>
-        <div class="dot-wave" id="active-wave"><span></span><span></span><span></span></div>
-        <span id="thought-summary-label">${escapeHtml(aiName)} is thinking... (0.0s)</span>
-      </summary>
-      <div class="thought-steps" id="active-thought-steps"></div>
-    </details>
-    <div id="active-reply-text" style="white-space:pre-wrap;"></div>
-  `;
+
+  const issueSlot = document.createElement('div');
+  issueSlot.className = 'msg-issue-slot';
+  botBubble.appendChild(issueSlot);
+
+  const detailsEl = buildThoughtDetailsWidget(`${aiName} is thinking... (0.0s)`, [], false, true);
+  botBubble.appendChild(detailsEl);
+
+  const replyTextDiv = document.createElement('div');
+  replyTextDiv.className = 'msg-reply-text';
+  replyTextDiv.style.whiteSpace = 'pre-wrap';
+  botBubble.appendChild(replyTextDiv);
+
   row.appendChild(botBubble);
   box.appendChild(row);
   box.scrollTop = box.scrollHeight;
 
-  const issueSlot = botBubble.querySelector('#active-issue-slot');
-  const detailsEl = botBubble.querySelector('.thought-details');
-  const waveEl = botBubble.querySelector('#active-wave');
-  const summaryLabel = botBubble.querySelector('#thought-summary-label');
-  const stepsDiv = botBubble.querySelector('#active-thought-steps');
-  const replyTextDiv = botBubble.querySelector('#active-reply-text');
+  const waveEl = detailsEl.querySelector('.thought-wave');
+  const summaryLabel = detailsEl.querySelector('.thought-summary-label');
+  const stepsDiv = detailsEl.querySelector('.thought-steps');
   let userTouchedDetails = false;
+  let autoOpenedOnce = false;
   let hadWorkbenchActivity = false;
   let hadIssueAlert = false;
-  if (detailsEl) {
-    const sumEl = detailsEl.querySelector('summary');
-    if (sumEl) sumEl.addEventListener('click', () => { userTouchedDetails = true; });
+  const sumEl = detailsEl.querySelector('summary');
+  if (sumEl) {
+    sumEl.addEventListener('click', () => { userTouchedDetails = true; });
   }
 
   window._activeGenTokens = 0;
@@ -4882,13 +5430,25 @@ async function sendMessage() {
   const timerId = setInterval(() => {
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
     summaryLabel.innerText = `${latestStepShort} (${elapsed}s)`;
-  }, 100);
+  }, 180);
+
+  // 60-FPS rAF token batcher so streaming never triggers synchronous layout reflow per token!
+  let pendingTokenText = '';
+  let rafScheduled = false;
+  function flushPendingTokens() {
+    rafScheduled = false;
+    if (!pendingTokenText) return;
+    replyTextDiv.appendChild(document.createTextNode(pendingTokenText));
+    pendingTokenText = '';
+    box.scrollTop = box.scrollHeight;
+  }
 
   const payload = {
     session_id: currentSessionId,
     message: text,
     attached_name: pendingAttachment.name,
-    attached_text: pendingAttachment.text
+    attached_text: pendingAttachment.text,
+    attached_media_urls: pendingAttachment.mediaUrls || []
   };
   clearAttachment();
 
@@ -4903,6 +5463,8 @@ async function sendMessage() {
     const decoder = new TextDecoder();
     let buffer = '';
     let stepCount = 0;
+    let toolCount = 0;
+    let thoughtCount = 0;
 
     while (true) {
       const { value, done } = await reader.read();
@@ -4918,27 +5480,43 @@ async function sendMessage() {
           if (evt.type === 'step') {
             stepCount++;
             latestStepShort = evt.text;
-            const sItem = document.createElement('div');
-            sItem.innerText = evt.text;
-            stepsDiv.appendChild(sItem);
-            if (detailsEl && !userTouchedDetails && (evt.text.includes('🧪') || evt.text.includes('🐍') || evt.text.includes('🎵') || evt.text.includes('🌦️') || evt.text.includes('💻') || evt.text.includes('🖥️') || evt.text.includes('🌐'))) {
+            const sItem = buildThoughtItemEl({ kind: 'step', text: evt.text, t: ((Date.now() - t0) / 1000).toFixed(1) });
+            if (sItem) stepsDiv.appendChild(sItem);
+            if (!userTouchedDetails && !autoOpenedOnce && (evt.text.includes('🧪') || evt.text.includes('🐍') || evt.text.includes('🎵') || evt.text.includes('🌦️') || evt.text.includes('💻') || evt.text.includes('🖥️') || evt.text.includes('🌐'))) {
               hadWorkbenchActivity = true;
+              autoOpenedOnce = true;
               detailsEl.open = true;
               box.scrollTop = box.scrollHeight;
             }
+          } else if (evt.type === 'thought') {
+            thoughtCount++;
+            latestStepShort = `🧠 ${evt.label || 'Reasoning'}...`;
+            const thEl = buildThoughtItemEl({ kind: 'thought', label: evt.label || 'Reasoning', text: evt.text || '' });
+            if (thEl) stepsDiv.appendChild(thEl);
+            if (!userTouchedDetails && !autoOpenedOnce) {
+              autoOpenedOnce = true;
+              detailsEl.open = true;
+            }
+            stepsDiv.scrollTop = stepsDiv.scrollHeight;
           } else if (evt.type === 'workbench_io') {
+            toolCount++;
             hadWorkbenchActivity = true;
-            if (detailsEl && !userTouchedDetails) detailsEl.open = true;
-            const ioCard = document.createElement('div');
-            ioCard.className = 'wb-io-card';
-            ioCard.innerHTML = `<div class="wb-io-code"><b>🐍 ${escapeHtml(evt.tool || 'workbench')}:</b>\n${escapeHtml(evt.code || '')}</div><div class="wb-io-out"><b>↳ Output:</b>\n${escapeHtml(evt.output || '')}</div>`;
-            stepsDiv.appendChild(ioCard);
+            if (!userTouchedDetails && !autoOpenedOnce) {
+              autoOpenedOnce = true;
+              detailsEl.open = true;
+            }
+            const ioCard = buildThoughtItemEl({ kind: 'workbench_io', tool: evt.tool, code: evt.code, output: evt.output });
+            if (ioCard) stepsDiv.appendChild(ioCard);
+            stepsDiv.scrollTop = stepsDiv.scrollHeight;
             box.scrollTop = box.scrollHeight;
           } else if (evt.type === 'sync_status') {
             refreshStatus();
           } else if (evt.type === 'issue' && evt.issue) {
             hadIssueAlert = true;
-            if (detailsEl && !userTouchedDetails) detailsEl.open = true;
+            if (!userTouchedDetails && !autoOpenedOnce) {
+              autoOpenedOnce = true;
+              detailsEl.open = true;
+            }
             const iss = evt.issue;
             issueSlot.innerHTML = `
               <div class="issue-alert">
@@ -4951,8 +5529,11 @@ async function sendMessage() {
             window._activeGenTokens = (window._activeGenTokens || 0) + 1;
             const streamOn = !(window.workspaceConfig && window.workspaceConfig.stream_tokens === false);
             if (streamOn) {
-              replyTextDiv.textContent += evt.text;
-              box.scrollTop = box.scrollHeight;
+              pendingTokenText += evt.text;
+              if (!rafScheduled) {
+                rafScheduled = true;
+                requestAnimationFrame(flushPendingTokens);
+              }
             } else {
               const secNow = Math.max(0.1, (Date.now() - t0) / 1000);
               const tps = (window._activeGenTokens / secNow).toFixed(1);
@@ -4960,11 +5541,20 @@ async function sendMessage() {
             }
           } else if (evt.type === 'done') {
             clearInterval(timerId);
+            flushPendingTokens();
             const totalTime = ((Date.now() - t0) / 1000).toFixed(1);
             if (waveEl) waveEl.style.display = 'none';
-            summaryLabel.innerText = `⚡ Completed in ${totalTime}s (${stepCount} steps — click to inspect)`;
+            if (evt.thought_trace && Array.isArray(evt.thought_trace.items) && evt.thought_trace.items.length > 0) {
+              summaryLabel.innerText = summarizeTraceCounts(evt.thought_trace);
+            } else {
+              const bits = [];
+              if (stepCount) bits.push(`${stepCount} step${stepCount === 1 ? '' : 's'}`);
+              if (toolCount) bits.push(`${toolCount} tool${toolCount === 1 ? '' : 's'}`);
+              if (thoughtCount) bits.push(`${thoughtCount} thought${thoughtCount === 1 ? '' : 's'}`);
+              summaryLabel.innerText = `⚡ Completed in ${totalTime}s${bits.length ? ' (' + bits.join(' · ') + ')' : ''}`;
+            }
             if (detailsEl && hadWorkbenchActivity && !userTouchedDetails && !hadIssueAlert) {
-              setTimeout(() => { if (!userTouchedDetails) detailsEl.open = false; }, 2200);
+              setTimeout(() => { if (!userTouchedDetails) detailsEl.open = false; }, 1800);
             }
             replyTextDiv.innerHTML = renderMarkdownAndArtifacts(evt.reply || replyTextDiv.textContent);
             if (evt.image_url) {
@@ -4984,7 +5574,7 @@ async function sendMessage() {
             }
             const finalTxt = evt.reply || replyTextDiv.textContent || '';
             if (!botBubble.querySelector('.msg-actions')) {
-              botBubble.appendChild(buildBubbleActionsBar('assistant', finalTxt, null));
+              botBubble.appendChild(buildBubbleActionsBar('assistant', finalTxt, evt.message_id || null));
             }
             if (ttsEnabled) {
               speakCompanionReply(finalTxt);
@@ -4998,6 +5588,7 @@ async function sendMessage() {
     refreshStatus();
   } catch (err) {
     clearInterval(timerId);
+    flushPendingTokens();
     if (waveEl) waveEl.style.display = 'none';
     replyTextDiv.textContent = '❌ Connection error: ' + err;
   } finally {
@@ -5319,6 +5910,86 @@ window.addEventListener('paste', (e) => {
 })();
 
 
+window.commandsCatalogCache = null;
+
+async function loadCommandsCheatSheet() {
+  const box = document.getElementById('commands-sheet-container');
+  if (!box) return;
+  if (!window.commandsCatalogCache) {
+    try {
+      const res = await fetch('/api/commands');
+      window.commandsCatalogCache = await res.json();
+    } catch (e) {
+      box.innerHTML = `<div class="issue-alert">Could not load /api/commands: ${escapeHtml(String(e))}</div>`;
+      return;
+    }
+  }
+  const q = (document.getElementById('commands-search-input') || {}).value || '';
+  filterCommandsSheet(q);
+}
+
+function runCommandFromSheet(cmdText) {
+  const btn = document.querySelector('.tab-btn[onclick*="tab-terminal"]');
+  switchModalTab('tab-terminal', btn);
+  runWebTerminalCmd(cmdText);
+}
+
+function copyCommandFromSheet(cmdText, btnEl) {
+  if (navigator.clipboard) navigator.clipboard.writeText(cmdText);
+  if (btnEl) {
+    const prev = btnEl.innerText;
+    btnEl.innerText = '✅';
+    setTimeout(() => { btnEl.innerText = prev; }, 1100);
+  }
+}
+
+function filterCommandsSheet(rawQuery) {
+  const box = document.getElementById('commands-sheet-container');
+  const pill = document.getElementById('cmd-count-pill');
+  const cat = window.commandsCatalogCache;
+  if (!box || !cat) return;
+  const q = (rawQuery || '').trim().toLowerCase();
+
+  const sections = [
+    { key: 'terminal',  title: '💻 Web Terminal & Manager Console (/help)', color: '#38bdf8', canRun: true },
+    { key: 'telegram',  title: '📱 Telegram Bot Commands (On-Demand /thought + Panel)', color: '#a78bfa', canRun: false },
+    { key: 'workbench', title: '🐍 Python Workbench (vault.* Helpers)', color: '#34d399', canRun: false },
+    { key: 'hotkeys',   title: '⚡ Studio Hotkeys & Stream Controls', color: '#fbbf24', canRun: false },
+  ];
+
+  let totalShown = 0;
+  let html = '';
+  sections.forEach(sec => {
+    const rows = (cat[sec.key] || []).filter(item =>
+      !q || (item.cmd || '').toLowerCase().includes(q) || (item.desc || '').toLowerCase().includes(q)
+    );
+    if (!rows.length) return;
+    totalShown += rows.length;
+    html += `<div class="card"><h3 style="color:${sec.color}; margin-bottom:8px;">${sec.title}</h3><div style="display:flex; flex-direction:column; gap:5px;">`;
+    rows.forEach(item => {
+      const safeCmdAttr = escapeHtml(item.cmd).replace(/'/g, '&#39;');
+      const runBtn = (sec.canRun && item.runnable)
+        ? `<button class="small-btn" onclick="runCommandFromSheet('${safeCmdAttr}')" title="Run in Web Terminal">▶️ Run</button>`
+        : '';
+      html += `
+        <div class="item-row" style="align-items:flex-start; gap:8px; padding:6px 8px;">
+          <div style="flex:1; min-width:0;">
+            <code style="color:${sec.color}; font-weight:700; font-size:0.78rem; word-break:break-word;">${escapeHtml(item.cmd)}</code>
+            <div style="font-size:0.73rem; color:#d1d5db; margin-top:2px;">${escapeHtml(item.desc)}</div>
+          </div>
+          <div style="display:flex; gap:4px; flex-shrink:0;">
+            <button class="secondary small-btn" onclick="copyCommandFromSheet('${safeCmdAttr}', this)" title="Copy command">📋</button>
+            ${runBtn}
+          </div>
+        </div>`;
+    });
+    html += `</div></div>`;
+  });
+
+  if (pill) pill.innerText = `${totalShown} command${totalShown === 1 ? '' : 's'}`;
+  box.innerHTML = html || '<div style="color:#9ca3af; font-size:0.8rem;">No commands matched that filter.</div>';
+}
+
 async function runWebTerminalCmd(presetCmd) {
   const inp = document.getElementById('web-term-input');
   const out = document.getElementById('web-term-out');
@@ -5624,5 +6295,42 @@ function closeSpecPulseModal() {
   if (f) f.src = 'about:blank';
 }
 </script>
+
+<div id="global-drop-overlay">
+  <div class="drop-zone-card">
+    <div style="font-size:2.4rem;margin-bottom:8px;">📎</div>
+    <div style="font-size:1.1rem;font-weight:700;color:#fff;">Drop Images, PDFs, Code or Media Anywhere</div>
+    <div style="font-size:0.82rem;color:#9ca3af;margin-top:4px;">Full original resolution preserved automatically — zero blurry compression.</div>
+  </div>
+</div>
+<div id="avs-lightbox" onclick="if(event.target===this) closeMediaLightbox()">
+  <div class="lb-topbar">
+    <span id="lb-meta" style="font-size:0.82rem;color:#e5e7eb;font-weight:600;">Full-Resolution Image</span>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <button class="secondary small-btn" onclick="toggleLightboxZoom()">🔍 Toggle 1:1 Zoom</button>
+      <a id="lb-dl-link" href="#" download><button class="small-btn">⬇️ Download Original</button></a>
+      <button class="secondary small-btn" onclick="closeMediaLightbox()">✖ Close (Esc)</button>
+    </div>
+  </div>
+  <div class="lb-stage" onclick="if(event.target===this) closeMediaLightbox()">
+    <img id="lb-img" src="" alt="Full resolution preview" onclick="toggleLightboxZoom()">
+  </div>
+</div>
+<div class="modal-backdrop" id="cloud-preview-modal" onclick="if(event.target===this) this.style.display='none'">
+  <div class="modal-window" style="max-width:780px;">
+    <div class="modal-top">
+      <strong id="cloud-prev-title" style="font-size:0.92rem;">Preview</strong>
+      <div style="display:flex;gap:6px;">
+        <a id="cloud-prev-dl" href="#" download><button class="small-btn">⬇️ Download</button></a>
+        <button class="secondary small-btn" onclick="document.getElementById('cloud-preview-modal').style.display='none'">✖ Close</button>
+      </div>
+    </div>
+    <div class="modal-body" id="cloud-prev-body"></div>
+  </div>
+</div>
+<script src="/avs_ui/media.js"></script>
+<script src="/avs_ui/composer.js"></script>
+<script src="/avs_ui/cloud.js"></script>
+<script src="/avs_ui/telegram.js"></script>
 </body>
 </html>

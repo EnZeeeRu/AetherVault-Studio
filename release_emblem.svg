@@ -1,0 +1,129 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240" role="img" aria-label="AetherVault Studio v7.1 Lamppost Emblem">
+  <defs>
+    <linearGradient id="lpHexBorder" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="48%" stop-color="#8b5cf6"/>
+      <stop offset="100%" stop-color="#f59e0b"/>
+    </linearGradient>
+    <linearGradient id="lpNightSky" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#070a16"/>
+      <stop offset="55%" stop-color="#14132e"/>
+      <stop offset="100%" stop-color="#1b183a"/>
+    </linearGradient>
+    <radialGradient id="lpLanternGlow" cx="50%" cy="39%" r="48%">
+      <stop offset="0%" stop-color="#fef3c7" stop-opacity="0.98"/>
+      <stop offset="22%" stop-color="#fbbf24" stop-opacity="0.62"/>
+      <stop offset="55%" stop-color="#f59e0b" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#7c3aed" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="lpFlameCore" cx="50%" cy="55%" r="55%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="45%" stop-color="#fde68a"/>
+      <stop offset="100%" stop-color="#f59e0b"/>
+    </radialGradient>
+    <linearGradient id="lpLightCone" x1="50%" y1="0%" x2="50%" y2="100%">
+      <stop offset="0%" stop-color="#fde68a" stop-opacity="0.44"/>
+      <stop offset="68%" stop-color="#f59e0b" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#38bdf8" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="lpSnowHill" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e293b"/>
+      <stop offset="50%" stop-color="#2e3b5c"/>
+      <stop offset="100%" stop-color="#11182c"/>
+    </linearGradient>
+    <linearGradient id="lpIron" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="45%" stop-color="#334155"/>
+      <stop offset="100%" stop-color="#090d16"/>
+    </linearGradient>
+    <clipPath id="lpHexClip">
+      <polygon points="120,10 215,65 215,175 120,230 25,175 25,65"/>
+    </clipPath>
+    <filter id="lpSoftBlur" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="3.4"/>
+    </filter>
+  </defs>
+
+  <!-- Outer Hex Frame -->
+  <polygon points="120,4 221,62 221,178 120,236 19,178 19,62" fill="#090b14" stroke="url(#lpHexBorder)" stroke-width="5"/>
+
+  <!-- Clipped Twilight Clearing Scene -->
+  <g clip-path="url(#lpHexClip)">
+    <rect x="0" y="0" width="240" height="240" fill="url(#lpNightSky)"/>
+
+    <!-- Subtle Aether Orbital Ring -->
+    <circle cx="120" cy="112" r="80" fill="none" stroke="#6366f1" stroke-opacity="0.24" stroke-width="1.3" stroke-dasharray="5 6"/>
+
+    <!-- Twilight Stars -->
+    <g fill="#e0f2fe" opacity="0.88">
+      <circle cx="52" cy="64" r="1.4"/>
+      <circle cx="76" cy="46" r="1.1"/>
+      <circle cx="164" cy="48" r="1.5"/>
+      <circle cx="188" cy="72" r="1.2"/>
+      <circle cx="45" cy="98" r="1.0"/>
+      <circle cx="194" cy="106" r="1.3"/>
+      <circle cx="94" cy="34" r="0.9"/>
+      <circle cx="146" cy="36" r="1.1"/>
+    </g>
+
+    <!-- Distant Frosty Pines Silhouette -->
+    <g fill="#0e1428" opacity="0.94">
+      <polygon points="30,188 50,120 70,188"/>
+      <polygon points="54,190 72,134 90,190"/>
+      <polygon points="150,190 168,132 186,190"/>
+      <polygon points="170,188 192,116 214,188"/>
+    </g>
+    <!-- Soft Rim-Lit Pine Highlights -->
+    <g fill="#38bdf8" opacity="0.18">
+      <polygon points="50,120 59,150 50,146"/>
+      <polygon points="168,132 159,158 168,154"/>
+    </g>
+
+    <!-- Ambient Golden Lantern Aura & Volumetric Light Cone -->
+    <circle cx="120" cy="92" r="90" fill="url(#lpLanternGlow)"/>
+    <polygon points="103,104 137,104 180,206 60,206" fill="url(#lpLightCone)"/>
+
+    <!-- Full Snowy Clearing Ground + Warm Pool of Light -->
+    <path d="M10,184 Q120,164 230,184 L230,240 L10,240 Z" fill="url(#lpSnowHill)"/>
+    <ellipse cx="120" cy="200" rx="64" ry="16" fill="#fbbf24" opacity="0.24" filter="url(#lpSoftBlur)"/>
+    <ellipse cx="120" cy="199" rx="32" ry="7" fill="#fef3c7" opacity="0.38"/>
+
+    <!-- Ornate Victorian Wrought-Iron Lamppost -->
+    <path d="M106,201 L134,201 L129,191 L111,191 Z" fill="url(#lpIron)" stroke="#475569" stroke-width="0.9"/>
+    <path d="M111,191 L129,191 L125.5,174 L114.5,174 Z" fill="url(#lpIron)" stroke="#475569" stroke-width="0.8"/>
+    <rect x="116.5" y="108" width="7" height="67" rx="2" fill="url(#lpIron)" stroke="#475569" stroke-width="0.7"/>
+    <!-- Decorative Crossbar Ladder Rest -->
+    <rect x="102" y="114" width="36" height="3.4" rx="1.7" fill="#1e293b" stroke="#64748b" stroke-width="0.7"/>
+    <circle cx="102" cy="115.7" r="2.3" fill="#475569"/>
+    <circle cx="138" cy="115.7" r="2.3" fill="#475569"/>
+    <!-- Scrollwork Brackets -->
+    <path d="M116.5,124 C109.5,124 107.5,118.5 110.5,115.7" fill="none" stroke="#64748b" stroke-width="1.5" stroke-linecap="round"/>
+    <path d="M123.5,124 C130.5,124 132.5,118.5 129.5,115.7" fill="none" stroke="#64748b" stroke-width="1.5" stroke-linecap="round"/>
+
+    <!-- Lantern Cage Glass & Glowing Flame -->
+    <polygon points="108,106 132,106 137,76 103,76" fill="#fef3c7" fill-opacity="0.30" stroke="#94a3b8" stroke-width="1.5"/>
+    <polygon points="110,104 130,104 134,78 106,78" fill="url(#lpFlameCore)" opacity="0.90"/>
+    <path d="M120,81 C124.5,88 125.5,95 120,100 C114.5,95 115.5,88 120,81 Z" fill="#ffffff"/>
+    <!-- Lantern Iron Mullions -->
+    <line x1="120" y1="76" x2="120" y2="106" stroke="#1e293b" stroke-width="1.4"/>
+    <line x1="111.5" y1="76" x2="114.5" y2="106" stroke="#1e293b" stroke-width="1.1" opacity="0.75"/>
+    <line x1="128.5" y1="76" x2="125.5" y2="106" stroke="#1e293b" stroke-width="1.1" opacity="0.75"/>
+    <!-- Lantern Crown & Finial -->
+    <path d="M99,76 L141,76 L128,64 L112,64 Z" fill="url(#lpIron)" stroke="#64748b" stroke-width="1"/>
+    <path d="M113.5,64 Q120,54 126.5,64 Z" fill="#334155" stroke="#94a3b8" stroke-width="0.8"/>
+    <line x1="120" y1="49" x2="120" y2="57.5" stroke="#cbd5e1" stroke-width="1.9" stroke-linecap="round"/>
+    <circle cx="120" cy="48" r="2.4" fill="#fde68a"/>
+
+    <!-- Drifting Snow & Light Motes -->
+    <g fill="#ffffff">
+      <circle cx="78" cy="84" r="1.8" opacity="0.78"/>
+      <circle cx="92" cy="112" r="1.4" opacity="0.65"/>
+      <circle cx="152" cy="96" r="1.9" opacity="0.8"/>
+      <circle cx="164" cy="128" r="1.3" opacity="0.6"/>
+      <circle cx="88" cy="154" r="1.6" opacity="0.7"/>
+      <circle cx="148" cy="148" r="1.5" opacity="0.72"/>
+      <circle cx="64" cy="134" r="1.2" opacity="0.5"/>
+      <circle cx="176" cy="82" r="1.3" opacity="0.55"/>
+    </g>
+  </g>
+</svg>

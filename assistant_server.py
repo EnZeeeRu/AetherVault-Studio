@@ -124,7 +124,8 @@ except ImportError:
 # =====================================================================
 # 1. PORTABLE PATHS, DIRECTORIES & PERSISTENT WORKSPACE CONFIG
 # =====================================================================
-APP_VERSION = "6.8"
+APP_VERSION = "7.1"
+APP_CODENAME = "Lamppost"
 SERVER_PORT = int(os.environ.get("AVS_PORT", "8000"))
 from avs import platform_bridge as avs_platform
 from avs import toolbox as avs_toolbox
@@ -137,6 +138,11 @@ from avs.contracts import ToolSpec, ToolResult
 from avs import memory_graph as avs_memory_graph
 from avs import language_tools as avs_lang
 from avs import manual_assets as avs_manual
+from avs import cloud_sync as avs_cloud_sync
+from avs import cloud_files as avs_cloud_files
+from avs import dlna_server as avs_dlna_server
+from avs import fs_ops as avs_fs_ops
+from avs import introspect as avs_introspect
 BASE_DIR = Path(__file__).parent.resolve()
 LOCALES_DIR = BASE_DIR / "locales"
 LOCALES_DIR.mkdir(parents=True, exist_ok=True)
@@ -153,6 +159,11 @@ MUSIC_MODEL_DIR = MODEL_DIR / "music"
 VOICE_MODEL_DIR = MODEL_DIR / "voice"
 VISION_MODEL_DIR = MODEL_DIR / "vision"
 ASSETS_DIR = BASE_DIR / "custom_assets"
+CHAT_MEDIA_DIR = ASSETS_DIR / "chat_media"
+VAULT_FILES_DIR = BASE_DIR / "vault_files"
+UI_ASSETS_DIR = BASE_DIR / "avs" / "ui"
+STICKERS_PATH = BASE_DIR / "telegram_stickers.json"
+SKILLS_PATH = BASE_DIR / "custom_skills.json"
 BACKUPS_DIR = BASE_DIR / "workspace_backups"
 CUSTOM_TOOLS_DIR = BASE_DIR / "custom_tools"
 CUSTOM_REQS_PATH = BASE_DIR / "custom_requirements.txt"
@@ -167,7 +178,7 @@ CONFIG_PATH = BASE_DIR / "workspace_config.json"
 UI_HTML_PATH = BASE_DIR / "ui_studio.html"
 
 TRANSLATE_MODEL_DIR = MODEL_DIR / "translate"
-for d in (PDF_DIR, LORE_SUBDIR, MODEL_DIR, IMG_MODEL_DIR, MUSIC_MODEL_DIR, VOICE_MODEL_DIR, VISION_MODEL_DIR, TRANSLATE_MODEL_DIR, HF_CACHE_DIR, MEMORY_DIR, CHAT_LOG_DIR, GEN_IMG_DIR, GEN_AUDIO_DIR, ASSETS_DIR, BACKUPS_DIR, CUSTOM_TOOLS_DIR, LOCALES_DIR, TEMP_SESSION_DIR):
+for d in (PDF_DIR, LORE_SUBDIR, MODEL_DIR, IMG_MODEL_DIR, MUSIC_MODEL_DIR, VOICE_MODEL_DIR, VISION_MODEL_DIR, TRANSLATE_MODEL_DIR, HF_CACHE_DIR, MEMORY_DIR, CHAT_LOG_DIR, GEN_IMG_DIR, GEN_AUDIO_DIR, ASSETS_DIR, CHAT_MEDIA_DIR, VAULT_FILES_DIR, UI_ASSETS_DIR, BACKUPS_DIR, CUSTOM_TOOLS_DIR, LOCALES_DIR, TEMP_SESSION_DIR):
     d.mkdir(parents=True, exist_ok=True)
 avs_lang.configure_portable_argos_dir(MODEL_DIR)
 
@@ -310,7 +321,16 @@ DEFAULT_CONFIG = {
         "enabled": False,
         "bot_token": "",
         "allowed_chat_id": "",
-        "miniapp_url": ""
+        "miniapp_url": "",
+        "typing_mode": "native",
+        "stickers_enabled": True,
+        "sticker_cooldown": 3
+    },
+    "vault_cloud": {
+        "enabled": True,
+        "dlna_enabled": False,
+        "dlna_name": "AetherVault Media",
+        "custom_roots": []
     },
     "bluesky": {
         "enabled": False,
@@ -338,7 +358,19 @@ DEFAULT_CONFIG = {
     "spellcheck_enabled": True,
     "translate_bridge_mode": "native",
     "stream_tokens": True,
-    "kv_cache_q8": True
+    "kv_cache_q8": False,
+    "flash_attn": False,
+    "cloud_sync": {
+        "provider": "webdav",
+        "subfolder": "cloud",
+        "webdav_url": "",
+        "webdav_username": "",
+        "webdav_password": "",
+        "gdrive_folder_id": "",
+        "gdrive_api_key": "",
+        "gdrive_bearer_token": "",
+        "local_mirror_path": ""
+    }
 }
 
 def load_workspace_config() -> dict:
@@ -351,6 +383,10 @@ def load_workspace_config() -> dict:
                     merged[k] = {**merged[k], **v}
                 else:
                     merged[k] = v
+            # Auto-heal legacy v6.x kv_cache_q8=True when flash_attn is off (prevents 1 tok/s Gemma/Vulkan stalls!)
+            if merged.get("kv_cache_q8") is True and not merged.get("flash_attn", False):
+                merged["kv_cache_q8"] = False
+                print("[CONFIG AUTO-HEAL] Reset legacy kv_cache_q8=True -> False for fast native FP16 KV decode.", flush=True)
             return merged
         except Exception as e:
             print(f"[CONFIG WARNING] Failed to parse workspace_config.json ({e}), using defaults.")
@@ -912,7 +948,12 @@ def init_db():
                         session_id TEXT,
                         role TEXT,
                         content TEXT,
+                        thought_trace TEXT DEFAULT '',
                         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)""")
+        c.execute("PRAGMA table_info(chat_messages)")
+        cm_cols = {row["name"] for row in c.fetchall()}
+        if "thought_trace" not in cm_cols:
+            c.execute("ALTER TABLE chat_messages ADD COLUMN thought_trace TEXT DEFAULT ''")
 
         c.execute("DELETE FROM chat_messages WHERE content LIKE 'functions.%' OR TRIM(content) = ''")
         c.execute("DELETE FROM dynamic_memory WHERE fact LIKE '%personalized mad chat box program in pythin%'")
@@ -1105,8 +1146,8 @@ def save_user_profile_card(card: dict):
     except Exception:
         pass
 
-def format_backend_context_card() -> str:
-    """Builds a tight, high-signal real-world state block held by the backend and injected every turn."""
+def format_backend_context_card(include_volatile: bool = False) -> str:
+    """Builds a KV-cache-friendly real-world state block (omits volatile last tool output from static prefix)."""
     card = load_user_profile_card()
     now_str = time.strftime("%A, %B %d, %Y")
     loc_str = card.get("location") or "Not shared yet (ask user if needed for local weather/info)"
@@ -1118,18 +1159,17 @@ def format_backend_context_card() -> str:
         except Exception:
             pass
     lines = [
-        "[BACKEND-HELD REALITY & USER CONTEXT CARD (ALWAYS TRUST THIS OVER GUESSING)]:",
-        f"- Current Date: {now_str} (exact live clock is appended per turn)",
-        f"- User: {card.get('user_name') or 'Creator'} | Real Location: {loc_str}"
+        "[USER CONTEXT CARD]:",
+        f"- Date: {now_str} | User: {card.get('user_name') or 'Creator'} | Location: {loc_str}"
     ]
     if card.get("custom_fields") and isinstance(card["custom_fields"], dict):
-        cf_pairs = [f"{k}={v}" for k, v in list(card["custom_fields"].items())[:8] if str(v).strip()]
+        cf_pairs = [f"{k}={v}" for k, v in list(card["custom_fields"].items())[:6] if str(v).strip()]
         if cf_pairs:
-            lines.append("- Custom Profile Fields: " + " | ".join(cf_pairs))
+            lines.append("- Fields: " + " | ".join(cf_pairs))
     if card.get("pinned_facts"):
-        lines.append("- Pinned Real Facts: " + " ; ".join(card["pinned_facts"][-6:]))
-    if card.get("last_workbench_summary"):
-        lines.append(f"- Last Real Tool/Workbench Result: {card['last_workbench_summary'][:240]}")
+        lines.append("- Pinned Facts: " + " ; ".join(card["pinned_facts"][-5:]))
+    if include_volatile and card.get("last_workbench_summary"):
+        lines.append(f"- Last Tool Result: {card['last_workbench_summary'][:200]}")
     return "\n".join(lines)
 
 PLACEHOLDER_LOCATIONS = {
@@ -1570,54 +1610,31 @@ def is_query_searchable_for_rescue(user_msg: str) -> bool:
 
 def build_assistant_workbench_system_prompt(ai_name: str, user_name: str, mem_context: str) -> str:
     """
-    Assistant-First Core Prompt (v4.5 — Full Companion Personality + Real PC Workbench!):
-    - Loads the user's real CORE personality voice card (sarcasm, nicknames, charm) directly.
-    - Keeps Lore RAG locked out so fictional cities never replace real weather/PC facts.
-    - Gives the model the Live In-Process Python Workbench (` ```workbench `) with `vault` pre-imported.
+    Evergreen-Speed Compact Operator Prompt (v7.0):
+    - ~65% smaller than v6.8 (~2.1 KB vs ~7.5 KB) -> instant prompt evaluation & sharper small-model focus!
+    - 100% static top prefix (no volatile last_workbench_summary) so llama.cpp reuses KV cache across turns.
+    - Full tool access preserved via concise map + `vault.help()` for niche commands.
     """
     pc_anchor = build_pc_reality_anchor()
-    backend_card = format_backend_context_card()
+    backend_card = format_backend_context_card(include_volatile=False)
     voice_card = build_companion_voice_card(ai_name, user_name)
     return (
-        f"You are {ai_name}, {user_name}'s real local AI Assistant & PC Workbench Operator running directly on their PC inside AetherVault Studio v{APP_VERSION}.\n"
-        f"CORE RULE: Real-world facts and live tool outputs ALWAYS override fiction (never invent fake weather, fake songs, or fake PC names), "
-        f"but ALWAYS speak with your full authentic personality and charm!\n"
+        f"You are {ai_name}, {user_name}'s local AI Assistant & PC Workbench Operator inside AetherVault Studio v{APP_VERSION}.\n"
+        f"Real tool outputs always override guesses; stay natural and in-character.\n"
         f"{build_epistemic_web_rule()}\n\n"
         f"{voice_card}\n\n"
         f"{backend_card}\n\n"
-        f"{pc_anchor}\n{build_epistemic_web_rule()}\n\n"
-        f"=== LIVE IN-PROCESS PYTHON WORKBENCH (RUNNING IN THE SAME BACKEND CONSOLE) ===\n"
-        f"To act on the PC or fetch live data, output ONLY a ```workbench block (`vault`, `os`, `json`, `math`, `Path`, `requests` are pre-imported):\n"
-        f"- vault.weather() -> live weather & 2-day forecast for the user's saved card/pin (pass a city ONLY if checking a different city!)\n"
-        f"- vault.web('clean keywords') / vault.docs('python/api topic') / vault.help() -> live web search, technical docs research & Workbench cheatsheet\n"        f"- vault.chunk_read('path', chunk_index=0, chunk_size=10000) -> read huge files/logs/PDFs chunk-by-chunk across chained Workbench steps\n"
-        f"- vault.pc_info() -> real PC hostname, OS, RAM, Spotify status & libraries\n"
-        f"- vault.files('steam' or 'C:/path' or 'keyword') -> scan local PC / Drive files\n"
-        f"- vault.spotify('current_track'|'playlists'|'play_playlist'|'play_album'|'liked'|'play_liked'|'play'|'pause'|'next'|'prev', 'query') -> inspect or play full playlists/albums/Liked Songs (NEVER change playback if user just asks to look!)\n"
-        f"- vault.browser(url='https://...', private=False, search='') | vault.youtube('query', private=True) | vault.fetch_url('https://...') -> open tabs, search YouTube, or read live webpages!\n- vault.disk_usage() | vault.ps_list() | vault.debug_log() | vault.clipboard('read'|'write', text) | vault.notify(title, msg) | vault.timer(secs, msg) -> real drives, clipboard, desktop toasts & timers!\n"
-        f"- vault.write_desktop('hello_world.txt', 'Hello!') / vault.write_file('Desktop/test.txt', '...') / vault.read_file('Desktop/test.txt') -> silent PC file I/O\n"
-        f"- vault.run_cmd('powershell command') -> silent background shell command (requires Full PC trust)\n"
-        f"- vault.toggle('workspace_mode'|'workbench_trust'|'offline_mode'|'brain_mode'|'performance_mode'|'theme_preset'|'osworld_enabled', value) -> flip your own Studio toggles when user asks!\n"
-        f"- vault.settings() / vault.pip_list() -> inspect current toggles & any installed pip libraries (you can import any pip package directly!)\n"
-        f"- vault.open_app('steam'|'spotify'|'discord'|'notepad') / vault.osworld('screenshot'|'list_windows'|'open_app', 'arg') -> launch apps & desktop control\n"
-        f"- vault.update_profile(user_name=..., location=..., zip_code=..., add_fact=..., remove_fact=..., custom_fields={{...}}) / vault.profile() -> edit or inspect the persistent User Card\n"
-        f"- vault.memory_save(cat, fact) / vault.memory_edit(id, fact) / vault.forget(id_or_keyword) -> full Memory Vault & pseudo-memory CRUD\n"
-        f"- vault.update_identity(ai_name=..., greeting_message=..., append_persona=...) / vault.update_partner_bond(...) / vault.set_theme(preset=..., colors={{...}}) -> customize your own persona, bond & studio theme\n"
-        f"- vault.knowledge_list() / vault.knowledge_write('lore/note.md', text, mode='lore') / vault.knowledge_mode(file, 'core'|'lore') / vault.knowledge_delete(file) / vault.lore('keywords') -> full Knowledge Tree control\n"
-        f"- vault.make_dir(path) / vault.move_file(src, dst) / vault.delete_file(path) / vault.rename_session(title) / vault.generate_image(prompt) / vault.generate_music(prompt) / vault.propose_core_fix(file, old, new, reason)\n"
-        f"- vault.run_isolated(code, timeout=15) -> run heavy/experimental Python in a killable child subprocess\n"
-        f"- vault.test_all(include_active=False) / vault.test_step('tool') -> run context-safe step-by-step tool gauntlet\n\n"
-        f"IMPORTANT: To run any tool or PC action, output ONLY a ```workbench Python block (NEVER raw JSON like {{\"name\": ...}}!).\n\n"
-        f"=== EXAMPLES ===\n"
-        f"User: pick a song from my liked songs and play it\n"
-        f"Assistant:\n```workbench\nprint(vault.spotify('play_liked', ''))\n```\n"
-        f"User: make a hello world txt file on my desktop and open youtube in a private tab\n"
-        f"Assistant:\n```workbench\nprint(vault.write_desktop('hello_world.txt', 'Hello World from AetherVault!'))\nprint(vault.browser('https://youtube.com', private=True))\n```\n"
-        f"User: switch to full PC mode and cyber cyan theme\n"
-        f"Assistant:\n```workbench\nprint(vault.toggle('workbench_trust', 'full_pc'))\nprint(vault.toggle('theme_preset', 'visor_cyan'))\n```\n\n"        f"User: did Hollow Knight Silksong come out yet or what's the latest update on it?\n"
-        f"Assistant:\n```workbench\nprint(vault.web('Hollow Knight Silksong release date latest news'))\n```\n\n"
+        f"{pc_anchor}\n\n"
+        f"=== LIVE PYTHON WORKBENCH (` ```workbench `) ===\n"
+        f"To use any PC/web tool, output ONLY a ```workbench block (`vault`, `os`, `json`, `math`, `Path`, `requests` pre-imported; NEVER raw JSON tool calls):\n"
+        f"- Web/Weather: vault.weather() | vault.web('keywords') | vault.fetch_url('url') | vault.docs('topic')\n"
+        f"- PC/Files/Apps: vault.pc_info() | vault.files('query') | vault.read_file('path') | vault.chunk_read('path', 0) | vault.write_desktop('f.txt', 'txt') | vault.open_app('app') | vault.browser(url, private=False, search='') | vault.run_cmd('cmd')\n"
+        f"- Media/Desktop: vault.spotify('current_track'|'playlists'|'play_liked'|'play'|'pause'|'next'|'prev', 'q') | vault.osworld('screenshot'|'list_windows'|'open_app', 'arg') | vault.generate_image('p') | vault.generate_music('p')\n"
+        f"- Memory/Studio: vault.profile() | vault.update_profile(...) | vault.memory_save(cat, fact) | vault.forget(id_or_kw) | vault.toggle(key, val) | vault.lore('kw') | vault.spellcheck(txt) | vault.translate(txt, to='en')\n"
+        f"- Plugins/More: vault.create_tool(name, code, test_code) | vault.test_all() | vault.help('topic') for all remaining methods.\n"
+        f"Example:\n```workbench\nprint(vault.web('latest news topic'))\n```\n\n"
         f"=== MEMORY VAULT ===\n{mem_context}"
     )
-
 def clean_assistant_theatrics(reply_text: str, is_assistant_mode: bool) -> str:
     """Cleans leaked internal prompt headers, echoed PC Reality Anchor lines, and raw workbench/JSON stubs while keeping full companion charm."""
     if not reply_text:
@@ -2109,7 +2126,28 @@ def apply_studio_toggle(setting: str, value) -> str:
         STATE["ui_sync_needed"] = True
         return f"Switched Uncapped / Deep-Run Token Engine -> {'ON (Max Context + Rolling Auto-Continue)' if b else 'OFF (Compact Standard Budget)'}."
 
-    return f"Unknown toggle '{setting}'. Available toggles: workspace_mode, workbench_trust, offline_mode, auto_web_search, unrestricted_tokens, brain_mode, performance_mode, osworld_enabled, theme_preset, voice_profile."
+    if key in ("dlna_enabled", "dlna", "media_server", "roku", "upnp"):
+        b = _to_bool(value)
+        vc = WORKSPACE_CFG.setdefault("vault_cloud", {"enabled": True, "dlna_enabled": False, "dlna_name": "AetherVault Media", "custom_roots": []})
+        vc["dlna_enabled"] = b
+        save_workspace_config(WORKSPACE_CFG)
+        if "DLNA_SERVER" in globals():
+            if b:
+                DLNA_SERVER.start(vc.get("dlna_name") or "AetherVault Media")
+            else:
+                DLNA_SERVER.stop()
+        STATE["ui_sync_needed"] = True
+        return f"Switched DLNA / UPnP Media Server (Roku & VLC) -> {'ON (Broadcasting AetherVault Media on LAN)' if b else 'OFF (Sent ssdp:byebye & stopped)'}."
+
+    if key in ("cloud_enabled", "vault_cloud", "file_server", "cloud"):
+        b = _to_bool(value)
+        vc = WORKSPACE_CFG.setdefault("vault_cloud", {"enabled": True, "dlna_enabled": False, "dlna_name": "AetherVault Media", "custom_roots": []})
+        vc["enabled"] = b
+        save_workspace_config(WORKSPACE_CFG)
+        STATE["ui_sync_needed"] = True
+        return f"Switched Vault Cloud LAN File Server -> {'ON' if b else 'OFF'}."
+
+    return f"Unknown toggle '{setting}'. Available toggles: workspace_mode, workbench_trust, offline_mode, auto_web_search, unrestricted_tokens, brain_mode, performance_mode, osworld_enabled, theme_preset, voice_profile, dlna_enabled, cloud_enabled."
 
 def get_current_studio_toggles() -> dict:
     return {
@@ -2122,7 +2160,9 @@ def get_current_studio_toggles() -> dict:
         "theme_preset": WORKSPACE_CFG.get("theme_preset", "aether_violet"),
         "voice_profile": WORKSPACE_CFG.get("voice_profile", "af_nicole_river"),
         "auto_web_search": bool(WORKSPACE_CFG.get("auto_web_search", True)),
-        "unrestricted_tokens": bool(WORKSPACE_CFG.get("unrestricted_tokens", True))
+        "unrestricted_tokens": bool(WORKSPACE_CFG.get("unrestricted_tokens", True)),
+        "dlna_enabled": bool((WORKSPACE_CFG.get("vault_cloud") or {}).get("dlna_enabled", False)),
+        "cloud_enabled": bool((WORKSPACE_CFG.get("vault_cloud") or {}).get("enabled", True))
     }
 
 WORKBENCH_PERSISTENT_NS = {}
@@ -3328,6 +3368,18 @@ class _LiveInProcessVault:
     def create_tool(self, name, code, test_code=""): return create_and_verify_custom_tool(str(name), str(code), str(test_code))
     def reload_tools(self): return reload_custom_tools()
     def hf_inspect(self, repo_id): return inspect_huggingface_repo(str(repo_id))
+    def cloud_sync(self, direction="pull"):
+        res = avs_cloud_sync.run_configured_cloud_sync(WORKSPACE_CFG.get("cloud_sync") or {}, PDF_DIR, direction=str(direction or "pull"), offline_mode=bool(STATE.get("offline_mode")))
+        if res.get("pulled"):
+            sync_priority_files(force=True)
+            STATE["ui_sync_needed"] = True
+        return res.get("message") or res.get("error") or json.dumps(res)
+    def pull_url_to_lore(self, url, subfolder="cloud"):
+        res = avs_cloud_sync.pull_url_to_knowledge_tree(str(url or ""), PDF_DIR, subfolder=str(subfolder or "cloud"), offline_mode=bool(STATE.get("offline_mode")))
+        if res.get("ok"):
+            sync_priority_files(force=True)
+            STATE["ui_sync_needed"] = True
+        return res.get("message") or res.get("error") or json.dumps(res)
     def detect_lang(self, text): return avs_lang.detect_language(str(text or ""), default=(WORKSPACE_CFG.get("ui_language") or "en"))
     def spellcheck(self, text, lang="auto"): return run_lore_safe_spellcheck(str(text or ""), lang=str(lang or "auto"))
     def translate(self, text, to="en", src="auto"): return avs_lang.translate_text(str(text or ""), to_lang=str(to or "en"), from_lang=str(src or "auto"), model_dir=MODEL_DIR)
@@ -3377,6 +3429,38 @@ class _LiveInProcessVault:
     def generate_music(self, prompt, duration=8): return execute_workbench_rpc_action("generate_music", {"prompt": prompt, "duration": duration}).get("result")
     def propose_core_fix(self, target_file, find_snippet, replace_snippet, reason=""):
         return execute_workbench_rpc_action("propose_core_fix", {"target_file": target_file, "find_snippet": find_snippet, "replace_snippet": replace_snippet, "reason": reason}).get("result")
+    @property
+    def fs(self):
+        class _FSBridge:
+            def tree(self_f, path=".", depth=2): return avs_fs_ops.tree(str(path), int(depth))
+            def copy(self_f, src, dst): return avs_fs_ops.copy_path(str(src), str(dst), BASE_DIR, PROTECTED_CORE_FILES, WORKSPACE_CFG.get("workbench_trust", "safe_auto"))
+            def move(self_f, src, dst): return avs_fs_ops.move_path(str(src), str(dst), BASE_DIR, PROTECTED_CORE_FILES, WORKSPACE_CFG.get("workbench_trust", "safe_auto"))
+            def rename(self_f, src, new_name): return avs_fs_ops.rename_path(str(src), str(new_name), BASE_DIR, PROTECTED_CORE_FILES)
+            def mkdir(self_f, path): return execute_workbench_rpc_action("fs_op", {"action": "mkdir", "path": str(path)}).get("result")
+            def trash(self_f, path): return avs_fs_ops.trash_path(str(path), BASE_DIR, PROTECTED_CORE_FILES)
+            def relocate_app(self_f, src, dst, mode="junction", background=False):
+                return avs_fs_ops.relocate_app(str(src), str(dst), BASE_DIR, PROTECTED_CORE_FILES, mode=str(mode), temp_dir=TEMP_SESSION_DIR, background=bool(background))
+        return _FSBridge()
+
+    @property
+    def shortcuts(self):
+        class _ShortcutBridge:
+            def create(self_s, target_path, shortcut_path, arguments="", working_dir="", icon_path="", description=""):
+                return avs_fs_ops.create_shortcut(str(target_path), str(shortcut_path), str(arguments), str(working_dir), str(icon_path), str(description))
+            def list(self_s, folder="Desktop"): return avs_fs_ops.list_shortcuts(str(folder))
+            def rewrite(self_s, old_prefix, new_prefix, search_dirs=None): return avs_fs_ops.rewrite_shortcuts(str(old_prefix), str(new_prefix), search_dirs)
+        return _ShortcutBridge()
+
+    def inspect(self, target, max_members=24): return avs_introspect.inspect_target(target, max_members=int(max_members))
+    def api_probe(self, base_url, headers=None): return avs_introspect.api_probe(str(base_url), headers=headers, offline_mode=bool(STATE.get("offline_mode")))
+    def job_status(self, job_id=""): return avs_fs_ops.get_job_status(str(job_id or ""))
+    def media_server(self, action="status", enabled=None):
+        act = str(action or "status").strip().lower()
+        if enabled is not None: return apply_studio_toggle("dlna_enabled", bool(enabled))
+        if act in ("on", "start", "enable"): return apply_studio_toggle("dlna_enabled", True)
+        if act in ("off", "stop", "disable"): return apply_studio_toggle("dlna_enabled", False)
+        return DLNA_SERVER.status() if "DLNA_SERVER" in globals() else {"enabled": False}
+
     def run_isolated(self, code: str, timeout: float = 15.0):
         """Runs heavy or untrusted Python code in a killable child subprocess with a hard timeout."""
         return avs_workbench.run_workbench_subprocess(
@@ -3482,7 +3566,8 @@ def execute_workbench_code(code_str: str) -> dict:
             result_box["ok"] = False
             result_box["err_type"] = etype
             result_box["err_msg"] = emsg
-            msg = f"{etype}: {emsg}"
+            smart_hint = avs_introspect.build_error_hint(e, WORKBENCH_PERSISTENT_NS)
+            msg = f"{etype}: {emsg}" + (f"\n{smart_hint}" if smart_hint else "")
             result_box["output"] = (f"{err_so_far}\n{msg}" if err_so_far else msg)[:max_out_chars]
             # Rollback namespace so a broken run never poisons `vault` or previously computed variables
             WORKBENCH_PERSISTENT_NS.clear()
@@ -3673,18 +3758,25 @@ def get_pc_environment_info() -> dict:
         "installed_libraries": installed_libs
     }
 
+_PC_ANCHOR_CACHE = {"ts": 0.0, "key": "", "text": ""}
+
 def build_pc_reality_anchor() -> str:
-    """Compact 4-line live PC grounding block injected into prompts so the model knows its real environment."""
+    """Cached 3-line KV-stable PC grounding block (avoids redundant package/OS scans on every message)."""
+    now = time.time()
+    brain_k = STATE.get("active_api_label") or STATE.get("current_model") or ""
+    cache_k = f"{brain_k}|{WORKSPACE_CFG.get('osworld_enabled', True)}|{STATE.get('offline_mode', False)}"
+    if _PC_ANCHOR_CACHE["text"] and _PC_ANCHOR_CACHE["key"] == cache_k and (now - _PC_ANCHOR_CACHE["ts"]) < 45.0:
+        return _PC_ANCHOR_CACHE["text"]
     info = get_pc_environment_info()
-    libs_str = ", ".join(info["installed_libraries"][:14]) or "standard stdlib"
-    return (
-        "[LIVE PC REALITY ANCHOR — REAL HOST TELEMETRY]:\n"
-        f"- PC Hostname: {info['pc_hostname']} | OS: {info['os_platform']} | CPU: {info['cpu_threads']}T | RAM: {info['ram_total_gb']} GB Total\n"
-        f"- Workspace: {info['workspace_dir']} | Brain: {info['active_brain']} | Spotify: {info['spotify_status']} | OSWorld: {'ON' if info['osworld_enabled'] else 'OFF'}\n"
-        f"- Installed Python Libraries: {libs_str}\n"
-        "- STRICT GROUNDING RULE: NEVER invent PC names, fake terminal commands, or roleplay fake tool actions (like *opens Spotify* or *scans files*). "
-        "When asked to check the PC, play music, search the web, or run code, CALL THE REAL TOOL and report only actual returned results."
+    libs_str = ", ".join(info["installed_libraries"][:12]) or "stdlib"
+    txt = (
+        "[HOST PC]:\n"
+        f"- Host: {info['pc_hostname']} | OS: {info['os_platform']} | CPU: {info['cpu_threads']}T | RAM: {info['ram_total_gb']} GB\n"
+        f"- Workspace: {info['workspace_dir']} | Spotify: {info['spotify_status']} | OSWorld: {'ON' if info['osworld_enabled'] else 'OFF'} | Libs: {libs_str}\n"
+        "- Never invent PC info or fake tool actions; call real Workbench tools and report actual output."
     )
+    _PC_ANCHOR_CACHE.update({"ts": now, "key": cache_k, "text": txt})
+    return txt
 
 def build_operator_voice_card(ai_name: str, user_name: str) -> str:
     """Lean ~300-char personality header for Operator Mode (keeps attitude, strips heavy RP scenes & lore bloat)."""
@@ -4112,7 +4204,26 @@ def _recent_turns_had_tool_context(recent_turns: list) -> bool:
 def classify_task_gear(user_msg: str, attached_name: str = "", recent_turns: list = None) -> tuple:
     routing = WORKSPACE_CFG.get("routing_mode", "auto_reflex")
     ws_mode = WORKSPACE_CFG.get("workspace_mode", "assistant")
+    low = (user_msg or "").lower().strip()
+    words = re.findall(r"[a-zA-Z0-9_'-]+", low)
+
     if ws_mode == "assistant":
+        # Evergreen-Speed Fast-Path: keep quick casual chat in instant Gear 1 Reflex (auto-escalates if model calls a tool!)
+        if (
+            routing != "always_deep"
+            and STATE["performance_mode"] != "Turbo (Max Threads)"
+            and not attached_name
+            and len(words) <= 14
+            and len(user_msg) <= 110
+            and not is_operator_or_system_query(user_msg)
+            and not detect_weather_intent(user_msg)[0]
+            and not detect_freshness_or_fact_query(user_msg)[0]
+            and not is_tool_gauntlet_query(user_msg)[0]
+            and not _recent_turns_had_tool_context(recent_turns or [])
+            and not any(w in TAXING_TASK_KEYWORDS for w in words)
+            and not any(p in low for p in FAST_WEB_INTENT_PATTERNS)
+        ):
+            return "reflex", f"Evergreen Fast-Path ({len(words)} words -> instant Gear 1)"
         return "operator", "Assistant & Python Workbench Mode (Lore Locked Out)"
     if is_operator_or_system_query(user_msg) and not attached_name:
         return "operator", "Roleplay + Live Workbench Tool Mode (Voice Preserved | Lore Blocked for Tool Call)"
@@ -5323,7 +5434,7 @@ def get_governor_settings(gear: str = "deep", prompt_chars: int = 1200):
         "n_ctx": n_ctx,
         "actual_ctx": actual_ctx,
         "n_batch": n_batch,
-        "n_ubatch": min(256, n_batch),
+        "n_ubatch": n_batch,
         "max_tokens": safe_max_tokens,
         "uncapped": uncapped
     }
@@ -5384,20 +5495,24 @@ def load_local_model(filename: str):
             gpu_layers = -1 if STATE["gpu_offload"] else 0
             try:
                 use_mmap_flag = False if (os.cpu_count() or 4) <= 2 else True
+                is_gemma_file = "gemma" in model_path.name.lower()
+                # Opt-in flash_attn & Q8_0 KV cache only (both cause 1-3 tok/s regressions on Vulkan/CPU & Gemma!)
+                use_fa = bool(WORKSPACE_CFG.get("flash_attn", False)) and bool(STATE["gpu_offload"])
+                use_q8_kv = bool(WORKSPACE_CFG.get("kv_cache_q8", False)) and use_fa and not is_gemma_file
                 llama_kwargs = dict(
                     model_path=str(model_path),
                     n_ctx=cfg["n_ctx"],
                     n_threads=cfg["threads"],
                     n_threads_batch=cfg.get("threads_batch", max(2, (os.cpu_count() or 4) - 1)),
                     n_batch=cfg["n_batch"],
-                    n_ubatch=cfg.get("n_ubatch", min(256, cfg["n_batch"])),
+                    n_ubatch=cfg.get("n_ubatch", cfg["n_batch"]),
                     n_gpu_layers=gpu_layers,
                     use_mmap=use_mmap_flag,
-                    flash_attn=True if STATE["gpu_offload"] else False,
+                    flash_attn=use_fa,
                     verbose=False
                 )
-                if WORKSPACE_CFG.get("kv_cache_q8", True):
-                    # GGML_TYPE_Q8_0 = 8: cuts KV cache RAM/VRAM by ~50% with near-zero quality loss
+                if use_q8_kv:
+                    # GGML_TYPE_Q8_0 = 8 (only when flash_attn is explicitly enabled on non-Gemma GPUs)
                     llama_kwargs["type_k"] = 8
                     llama_kwargs["type_v"] = 8
                 try:
@@ -6663,11 +6778,18 @@ def _save_tg_offset(uid: int):
     except Exception:
         pass
 
-def _tg_api_post(token: str, method: str, payload: dict, timeout: int = 15) -> dict:
+def _tg_api_post(token: str, method: str, payload: dict, timeout: int = 15, _retry: int = 0) -> dict:
     try:
         r = requests.post(f"https://api.telegram.org/bot{token}/{method}", json=payload, timeout=timeout)
         if r.status_code == 200:
             return r.json()
+        if r.status_code == 429 and _retry == 0:
+            try:
+                ra = float(((r.json().get("parameters") or {}).get("retry_after")) or 2.0)
+            except Exception:
+                ra = 2.0
+            time.sleep(min(6.0, max(0.5, ra)))
+            return _tg_api_post(token, method, payload, timeout=timeout, _retry=1)
         return {"ok": False, "status": r.status_code, "text": (r.text or "")[:200]}
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -6685,15 +6807,42 @@ _TG_REGISTERED_TOKENS = set()
 
 TELEGRAM_BOT_COMMANDS = [
     {"command": "menu", "description": "🎛️ Open AetherVault Quick Control Panel"},
+    {"command": "thought", "description": "🧠 Show thought & tool process of last reply"},
     {"command": "status", "description": "📊 Check active model, RAM & mode"},
     {"command": "specs", "description": "🖥️ Deep hardware & GPU/VRAM specs"},
     {"command": "queue", "description": "📥 Check Telegram worker queue"},
     {"command": "unload", "description": "💤 Unload model to free RAM/VRAM"},
     {"command": "wake", "description": "⚡ Wake sleeping GGUF model"},
     {"command": "stop", "description": "⏹️ Stop active generation"},
+    {"command": "files", "description": "📄 List Knowledge Tree (/priority_pdfs) files"},
+    {"command": "getfile", "description": "📤 Download a lore/PDF file to Telegram"},
+    {"command": "sync", "description": "☁️ Sync Nextcloud/WebDAV or Google Drive lore"},
+    {"command": "pullurl", "description": "🔗 Pull Google Doc/Drive URL into Knowledge Tree"},
     {"command": "update", "description": "🔄 Pull GitHub OTA update"},
     {"command": "help", "description": "📖 Show all commands"},
 ]
+
+def format_thought_trace_for_telegram(trace_obj: dict) -> str:
+    """Renders a persisted SQLite thought_trace into a clean, readable Telegram message."""
+    if not isinstance(trace_obj, dict) or not trace_obj.get("items"):
+        return "🧠 No thought/tool steps were recorded for that message."
+    items = trace_obj.get("items") or []
+    elapsed = trace_obj.get("elapsed_sec", "?")
+    lines = [f"🧠 Thought & Tool Process ({elapsed}s | {len(items)} events):"]
+    for it in items[:40]:
+        kind = it.get("kind") or "step"
+        t_s = f"[{it.get('t', 0)}s] " if it.get("t") is not None else ""
+        if kind == "thought":
+            lbl = it.get("label") or "Reasoning"
+            lines.append(f"\n💭 {t_s}{lbl}:\n{(it.get('text') or '').strip()[:1200]}")
+        elif kind == "workbench_io":
+            tool_n = it.get("tool") or "workbench"
+            code_s = (it.get("code") or "").strip()[:500]
+            out_s = (it.get("output") or "").strip()[:800]
+            lines.append(f"\n🐍 {t_s}{tool_n}:\n{code_s}\n↳ {out_s}")
+        else:
+            lines.append(f"• {t_s}{it.get('text') or ''}")
+    return "\n".join(lines)
 
 def _tg_build_control_keyboard() -> dict:
     """Builds an interactive Telegram inline button panel (plus Mini App button if HTTPS tunnel URL is set)."""
@@ -6758,39 +6907,57 @@ def _tg_send_media(token: str, chat_id: str, img_url: str = None, audio_url: str
             except Exception:
                 pass
 
-def generate_sync_reply_for_telegram(user_text: str, session_id: str = "telegram_session", progress_cb=None) -> tuple:
+def generate_sync_reply_for_telegram(user_text: str, session_id: str = "telegram_session", progress_cb=None, return_trace: bool = False) -> tuple:
     """
-    Robust v6.8 Telegram Brain + Live Python Workbench Engine:
+    Robust v7.0 Telegram Brain + Live Python Workbench Engine:
     - Works across Local GGUF, Smart API Waterfall, and Hybrid modes.
-    - Streams live step progress to Telegram ('Working in Workbench...') AND the main Studio UI top bar.
-    - Never crashes the polling thread on malformed outputs or empty replies.
-    Returns (reply_text, image_url, audio_url).
+    - Streams rolling live progress updates to Telegram AND saves full persistent `thought_trace` into SQLite
+      so the user can inspect reasoning & tool calls on demand via `/thought` or the inline button.
+    Returns (reply_text, image_url, audio_url) by default, or (reply_text, image_url, audio_url, msg_id, trace_obj) when return_trace=True.
     """
-    def _notify(step_msg: str):
+    tg_t0 = time.time()
+    tg_trace_items = []
+
+    def _rec_tg(kind: str, **kw):
+        entry = {"kind": kind, "t": round(time.time() - tg_t0, 1)}
+        entry.update(kw)
+        tg_trace_items.append(entry)
+
+    def _notify(step_msg: str, record: bool = True, major: bool = False):
         TELEGRAM_QUEUE_STATE["last_step"] = step_msg
         set_step(f"📱 [Telegram] {step_msg}")
+        if record:
+            _rec_tg("step", text=step_msg)
         if progress_cb:
             try:
-                progress_cb(step_msg)
+                progress_cb(step_msg, major)
+            except TypeError:
+                try:
+                    progress_cb(step_msg)
+                except Exception:
+                    pass
             except Exception:
                 pass
 
+    def _ret(rep, im=None, au=None, mid=None, tr=None):
+        return (rep, im, au, mid, tr) if return_trace else (rep, im, au)
+
     if STATE["loading_model"]:
-        return "⏳ Local GGUF model is currently loading into RAM/VRAM. Give it a few seconds and send your message again!", None, None
+        return _ret("⏳ Local GGUF model is currently loading into RAM/VRAM. Give it a few seconds and send your message again!")
 
     b_mode = WORKSPACE_CFG.get("brain_mode", "local_only")
     has_api_slots = bool([s for s in load_api_vault().get("slots", []) if s.get("enabled", True)])
     can_use_api = (b_mode in ("smart_api", "hybrid")) and has_api_slots and not STATE["offline_mode"]
     if not STATE["llm"] and not can_use_api and STATE.get("idle_sleeping"):
-        _notify("💤 Waking sleeping GGUF model back into RAM/VRAM...")
+        _notify("💤 Waking sleeping GGUF model back into RAM/VRAM...", major=True)
         touch_activity(wake_model=True)
     if not STATE["llm"] and not can_use_api:
         target_m = pick_lightweight_failsafe_model() if (b_mode == "hybrid" or STATE["performance_mode"] == "Laptop 2015 (Fast)") else (WORKSPACE_CFG.get("last_loaded_model") or pick_lightweight_failsafe_model())
         if target_m:
-            _notify(f"🧠 Auto-loading offline GGUF '{target_m}'...")
+            _notify(f"🧠 Auto-loading offline GGUF '{target_m}'...", major=True)
             load_local_model(target_m)
         if not STATE["llm"]:
-            return "⚠️ No local GGUF model loaded and no Smart API key configured in Studio yet.", None, None
+            return _ret("⚠️ No local GGUF model loaded and no Smart API key configured in Studio yet.")
 
     ai_n = WORKSPACE_CFG.get("ai_name", "Aether")
     usr_n = WORKSPACE_CFG.get("user_name", "Creator")
@@ -6805,17 +6972,24 @@ def generate_sync_reply_for_telegram(user_text: str, session_id: str = "telegram
         c.execute("SELECT role, content FROM chat_messages WHERE session_id = ? ORDER BY id DESC LIMIT 6", (session_id,))
         recent_turns = [{"role": r["role"], "content": r["content"]} for r in reversed(c.fetchall())]
 
-    harvest_passive_user_notes(user_text)
-    sync_pseudo_memory_and_index()
-    gear, _ = classify_task_gear(user_text, "", recent_turns)
+    gear, gear_reason = classify_task_gear(user_text, "", recent_turns)
     img_out = None
     aud_out = None
     reply = ""
 
+    def _extract_thoughts(raw_txt: str, label: str):
+        for pat in (r"<think>([\s\S]*?)</think>", r"<\|think\|>([\s\S]*?)<\|/think\|>", r"<\|thought\|>([\s\S]*?)<\|/thought\|>"):
+            for m_th in re.finditer(pat, raw_txt or "", flags=re.IGNORECASE):
+                th_s = (m_th.group(1) or "").strip()
+                if th_s:
+                    _rec_tg("thought", label=label, text=th_s[:6000])
+        cleaned = re.sub(r"<(?:think|\|think\||\|thought\|)>[\s\S]*?</(?:think|\|think\||\|thought\|)>", "", raw_txt or "", flags=re.IGNORECASE)
+        return cleaned.strip()
+
     STATE["generating"] = True
     try:
         if gear == "reflex":
-            _notify("⚡ Gear 1 Reflex: thinking...")
+            _notify(f"⚡ Gear 1 Reflex: {gear_reason}...", major=False)
             mem_short = format_memories_for_prompt(limit=3)
             digest = PRIORITY_CACHE["reflex_core_digest"] or build_reflex_persona_digest(WORKSPACE_CFG["persona_prompt"], ai_n, usr_n)
             static_sys = f"{digest}\n\n=== SESSION STATE ===\n{mem_short}"
@@ -6840,30 +7014,33 @@ def generate_sync_reply_for_telegram(user_text: str, session_id: str = "telegram
                     if (_now_s - _g1_tick) >= 1.9:
                         _g1_tick = _now_s
                         _tps = _g1_toks / max(0.1, _now_s - _g1_t0)
-                        _notify(f"⚡ Reflex generating ({_g1_toks} tokens • {_tps:.1f} tok/s)...")
-            reply = "".join(_g1_parts).strip()
-            if any(tag in reply for tag in ("[[DEEP]]", "[DEEP]", "<tool_call>", "```workbench", "vault.")):
+                        _notify(f"⚡ Reflex generating ({_g1_toks} tokens • {_tps:.1f} tok/s)...", record=False)
+            raw_g1 = "".join(_g1_parts).strip()
+            if any(tag in raw_g1 for tag in ("[[DEEP]]", "[DEEP]", "<tool_call>", "```workbench", "vault.")):
+                _notify("🧠 Escalating to Operator Workbench...", major=True)
                 gear = "operator"
             else:
-                reply = re.sub(r"<think>[\s\S]*?</think>", "", reply, flags=re.IGNORECASE).strip()
+                reply = _extract_thoughts(raw_g1, "Reflex Reasoning")
                 fast_search_m = re.search(r"\[\[SEARCH:([^\]]+)\]\]", reply)
                 if fast_search_m and not STATE["offline_mode"]:
                     fs_q = clean_web_search_query(fast_search_m.group(1).strip())
-                    _notify(f"🌐 Searching web for '{fs_q[:36]}'...")
+                    _notify(f"🌐 Searching web for '{fs_q[:36]}'...", major=True)
                     fs_out = search_web(fs_q)[:1400]
+                    _rec_tg("workbench_io", tool="web_search", code=f"vault.web({fs_q!r})", output=fs_out[:1200])
                     reply = synthesize_tool_followup(static_sys, recent_turns[-3:], re.sub(r"\[\[SEARCH:[^\]]+\]\]", "", reply).strip() or "Checking online.", f"[Live Web Search Results]:\n{fs_out}", cfg, usr_n, ai_n)
                 elif is_auto_web_search_enabled() and detect_model_uncertainty(reply) and is_query_searchable_for_rescue(user_text):
                     rq = clean_web_search_query(user_text)
-                    _notify(f"🌐 Auto-searching web for '{rq[:36]}'...")
+                    _notify(f"🌐 Auto-searching web for '{rq[:36]}'...", major=True)
                     r_out = search_web(rq)[:1400]
+                    _rec_tg("workbench_io", tool="uncertainty_web_rescue", code=f"vault.web({rq!r})", output=r_out[:1200])
                     reply = synthesize_tool_followup(static_sys, recent_turns[-3:], reply, f"[Auto-Web Results]:\n{r_out}", cfg, usr_n, ai_n)
 
         if gear != "reflex":
             is_op = (gear == "operator")
-            _notify("🛠️ Preparing Assistant & Live Python Workbench..." if is_op else "🧠 Gear 2 Deep Context + Workbench...")
+            _notify("🛠️ Preparing Assistant & Python Workbench..." if is_op else "🧠 Gear 2 Deep Context + Workbench...", major=False)
             mem_context = format_memories_for_prompt(limit=4 if is_op else 12)
             if is_op:
-                static_sys = build_assistant_workbench_system_prompt(ai_n, usr_n, mem_context)
+                static_sys = build_assistant_workbench_system_prompt(ai_n, usr_n, mem_context) + get_telegram_sticker_prompt_hint()
                 dyn_ctx = ""
             else:
                 core_rules = PRIORITY_CACHE["core_rules_text"] or WORKSPACE_CFG["persona_prompt"].replace("{ai_name}", ai_n).replace("{user_name}", usr_n)
@@ -6873,13 +7050,17 @@ def generate_sync_reply_for_telegram(user_text: str, session_id: str = "telegram
 
             is_g, g_act = is_tool_gauntlet_query(user_text)
             if is_g:
-                _notify("🧪 Running Step-by-Step Tool Gauntlet...")
-                dyn_ctx += "\n" + run_tool_gauntlet_compact(include_active=g_act)
+                _notify("🧪 Running Step-by-Step Tool Gauntlet...", major=True)
+                g_out = run_tool_gauntlet_compact(include_active=g_act)
+                _rec_tg("workbench_io", tool="tool_gauntlet", code=f"vault.test_all(include_active={g_act})", output=g_out[:1500])
+                dyn_ctx += "\n" + g_out
             else:
                 is_wq, wcity = detect_weather_intent(user_text)
                 if is_wq and not STATE["offline_mode"] and wcity:
-                    _notify(f"🌦️ Fetching live weather for '{wcity}'...")
-                    dyn_ctx += f"\n[REAL LIVE WEATHER DATA]:\n{get_live_weather(wcity)}"
+                    _notify(f"🌦️ Fetching live weather for '{wcity}'...", major=True)
+                    w_out = get_live_weather(wcity)
+                    _rec_tg("workbench_io", tool="weather", code=f"vault.weather({wcity!r})", output=w_out[:1000])
+                    dyn_ctx += f"\n[REAL LIVE WEATHER DATA]:\n{w_out}"
 
             messages = build_safe_messages(static_sys, dyn_ctx, recent_turns, max_turns=6)
             cfg = get_governor_settings("deep", sum(len(m["content"]) for m in messages))
@@ -6888,7 +7069,7 @@ def generate_sync_reply_for_telegram(user_text: str, session_id: str = "telegram
             for r_idx in range(max_rounds):
                 if STATE["stop_requested"]:
                     break
-                _notify(f"✍️ Generating response (Pass {r_idx+1}/{max_rounds})...")
+                _notify(f"✍️ Generating response (Pass {r_idx+1}/{max_rounds})...", major=(r_idx > 0))
                 _tg_parts = []
                 _tg_toks = 0
                 _tg_t0 = time.time()
@@ -6908,26 +7089,31 @@ def generate_sync_reply_for_telegram(user_text: str, session_id: str = "telegram
                         if (_now_s - _tg_last_tick) >= 1.9:
                             _tg_last_tick = _now_s
                             _tps = _tg_toks / max(0.1, _now_s - _tg_t0)
-                            _notify(f"✍️ Generating reply ({_tg_toks} tokens • {_tps:.1f} tok/s)...")
+                            _notify(f"✍️ Generating reply ({_tg_toks} tokens • {_tps:.1f} tok/s)...", record=False)
                 round_raw = "".join(_tg_parts).strip()
-                stripped = re.sub(r"<think>[\s\S]*?</think>", "", round_raw, flags=re.IGNORECASE).strip()
+                stripped = _extract_thoughts(round_raw, f"Model Reasoning (Pass {r_idx+1})")
                 wb_blocks, wb_cleaned = extract_workbench_blocks(stripped)
                 inline_calls, cleaned_round = extract_inline_tool_calls(wb_cleaned)
 
                 obs_list = []
                 if wb_blocks:
+                    if cleaned_round and len(cleaned_round.strip()) >= 8:
+                        _rec_tg("thought", label=f"Pre-Tool Thought (Round {r_idx+1})", text=cleaned_round.strip()[:1500])
                     for wb_i, wb_code in enumerate(wb_blocks):
-                        _notify(f"🐍 Working in Python Workbench (Round {r_idx+1}, Step {wb_i+1})...")
-                        wb_res, _ = run_blended_workbench_with_retry(wb_code, messages, cfg["max_tokens"], usr_n, ai_n)
-                        obs_list.append(wb_res.get("output") or "")
+                        _notify(f"🐍 Running Workbench (Round {r_idx+1}, Step {wb_i+1})...", major=True)
+                        wb_res, used_code = run_blended_workbench_with_retry(wb_code, messages, cfg["max_tokens"], usr_n, ai_n)
+                        out_s = wb_res.get("output") or ""
+                        _rec_tg("workbench_io", tool="run_workbench", code=used_code[:1200], output=out_s[:2000])
+                        obs_list.append(out_s)
                         if wb_res.get("image_url"):
                             img_out = wb_res["image_url"]
                         if wb_res.get("audio_url"):
                             aud_out = wb_res["audio_url"]
                 elif inline_calls:
                     for ic in inline_calls:
-                        _notify(f"🔧 Running tool '{ic['name']}' (Round {r_idx+1})...")
+                        _notify(f"🔧 Running tool '{ic['name']}' (Round {r_idx+1})...", major=True)
                         o_txt, t_i, t_a = execute_unified_tool(ic["name"], coerce_primitive_args(ic["arguments"]), session_id)
+                        _rec_tg("workbench_io", tool=ic["name"], code=json.dumps(ic.get("arguments") or {}, ensure_ascii=False)[:800], output=(o_txt or "")[:2000])
                         obs_list.append(o_txt)
                         if t_i:
                             img_out = t_i
@@ -6950,22 +7136,41 @@ def generate_sync_reply_for_telegram(user_text: str, session_id: str = "telegram
         reply, _ref_warns = referee_lore_and_grounding(reply, user_text, ai_n, "")
         if not reply:
             reply = "✅ Done."
-        update_partner_evolution(user_text, reply)
+
+        trace_payload = {
+            "elapsed_sec": round(time.time() - tg_t0, 1),
+            "items": tg_trace_items[-80:],
+            "image_url": img_out,
+            "audio_url": aud_out,
+        }
+        trace_json = json.dumps(trace_payload, ensure_ascii=False)
         with get_db() as conn:
-            conn.execute("INSERT INTO chat_messages (session_id, role, content) VALUES (?, 'assistant', ?)", (session_id, reply))
+            cur_tg = conn.execute(
+                "INSERT INTO chat_messages (session_id, role, content, thought_trace) VALUES (?, 'assistant', ?, ?)",
+                (session_id, reply, trace_json)
+            )
+            saved_mid = cur_tg.lastrowid
             conn.execute("UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (session_id,))
             conn.commit()
-        threading.Thread(target=export_chats_to_txt_files, daemon=True).start()
-        return reply, img_out, aud_out
+
+        def _bg_tg_post(_u=user_text, _r=reply):
+            try:
+                harvest_passive_user_notes(_u)
+                update_partner_evolution(_u, _r)
+                sync_pseudo_memory_and_index()
+                export_chats_to_txt_files()
+            except Exception:
+                pass
+        threading.Thread(target=_bg_tg_post, daemon=True).start()
+        return _ret(reply, img_out, aud_out, saved_mid, trace_payload)
     except Exception as tg_err:
         err_s = f"{type(tg_err).__name__}: {tg_err}"
         TELEGRAM_QUEUE_STATE["last_error"] = err_s
-        return f"⚠️ Telegram turn encountered an issue: {err_s[:240]}", None, None
+        return _ret(f"⚠️ Telegram turn encountered an issue: {err_s[:240]}")
     finally:
         STATE["generating"] = False
         TELEGRAM_QUEUE_STATE["last_step"] = "Idle"
         set_step("Idle")
-
 def telegram_polling_worker():
     STATE["telegram_last_update_id"] = _load_tg_offset()
     while True:
@@ -7008,15 +7213,35 @@ def telegram_polling_worker():
                 if cb:
                     cb_id = cb.get("id")
                     cb_data = (cb.get("data") or "").strip()
-                    cb_chat = str(((cb.get("message") or {}).get("chat") or {}).get("id") or "")
+                    cb_msg = cb.get("message") or {}
+                    cb_chat = str((cb_msg.get("chat") or {}).get("id") or "")
+                    cb_mid = int(cb_msg.get("message_id") or 0)
                     if cb_id:
                         _tg_api_post(token, "answerCallbackQuery", {"callback_query_id": cb_id}, timeout=6)
                     if cb_chat and cb_data:
-                        pending_msgs.append((cb_chat, cb_data))
+                        if cb_data.startswith("argo:") and cb_mid:
+                            pending_msgs.append((cb_chat, f"__ARGO_CB__:{cb_mid}:{cb_data}"))
+                        else:
+                            pending_msgs.append((cb_chat, cb_data))
                     continue
                 msg = u.get("message") or u.get("edited_message") or {}
                 chat_id = str((msg.get("chat") or {}).get("id") or "")
+                if chat_id and time.time() < float(STATE.get("telegram_detect_until") or 0):
+                    STATE["telegram_detected_chat_id"] = chat_id
+                stk_obj = msg.get("sticker") if isinstance(msg.get("sticker"), dict) else None
+                photo_arr = msg.get("photo") if isinstance(msg.get("photo"), list) and msg.get("photo") else None
+                doc_obj = msg.get("document") if isinstance(msg.get("document"), dict) else None
                 text = (msg.get("text") or msg.get("caption") or "").strip()
+                if stk_obj and chat_id:
+                    pending_msgs.append((chat_id, "__TG_STICKER__:" + json.dumps(stk_obj, ensure_ascii=False)))
+                    continue
+                if photo_arr and chat_id:
+                    best_p = photo_arr[-1]
+                    pending_msgs.append((chat_id, "__TG_PHOTO__:" + json.dumps({"photo": best_p, "caption": text}, ensure_ascii=False)))
+                    continue
+                if doc_obj and chat_id:
+                    pending_msgs.append((chat_id, "__TG_DOC__:" + json.dumps({"doc": doc_obj, "caption": text}, ensure_ascii=False)))
+                    continue
                 if text and chat_id:
                     if text.startswith("/"):
                         parts_cmd = text.split(None, 1)
@@ -7040,19 +7265,83 @@ def telegram_polling_worker():
                     continue
 
                 low_t = text.lower()
+                if text.startswith("__ARGO_CB__:"):
+                    _, mid_s, argo_cmd = text.split(":", 2)
+                    mid_i = int(mid_s) if mid_s.isdigit() else 0
+                    page_n = 1
+                    if argo_cmd == "argo:new":
+                        new_sid = f"telegram_{chat_id}_{int(time.time())}"
+                        new_title = f"📱 TG Chat {time.strftime('%m/%d %H:%M')}"
+                        with get_db() as conn:
+                            conn.execute("INSERT OR IGNORE INTO chat_sessions (id, title) VALUES (?, ?)", (new_sid, new_title))
+                            conn.commit()
+                        TELEGRAM_ACTIVE_THREADS[chat_id] = new_sid
+                    elif argo_cmd.startswith("argo:pick:"):
+                        TELEGRAM_ACTIVE_THREADS[chat_id] = argo_cmd.split("argo:pick:", 1)[1].strip()
+                    elif argo_cmd == "argo:toggle_dlna":
+                        apply_studio_toggle("dlna_enabled", not DLNA_SERVER.running)
+                    elif argo_cmd == "argo:toggle_cloud":
+                        cur_c = bool((WORKSPACE_CFG.get("vault_cloud") or {}).get("enabled", True))
+                        apply_studio_toggle("cloud_enabled", not cur_c)
+                    elif argo_cmd == "argo:toggle_mode":
+                        cur_m = WORKSPACE_CFG.get("workspace_mode", "assistant")
+                        apply_studio_toggle("workspace_mode", "roleplay" if cur_m == "assistant" else "assistant")
+                    elif argo_cmd.startswith("argo:chats:"):
+                        try:
+                            page_n = int(argo_cmd.rsplit(":", 1)[1])
+                        except Exception:
+                            page_n = 1
+                    p_txt, p_kb = _tg_build_argo_panel(chat_id, page=page_n)
+                    if mid_i:
+                        _tg_api_post(token, "editMessageText", {"chat_id": chat_id, "message_id": mid_i, "text": p_txt, "reply_markup": p_kb}, timeout=10)
+                    else:
+                        _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": p_txt, "reply_markup": p_kb}, timeout=10)
+                    continue
+
+                if low_t.startswith("/addsticker"):
+                    mood_arg = text.split(None, 1)[1].strip()[:32] if " " in text else "vibe"
+                    STATE["telegram_sticker_capture_mood"] = mood_arg
+                    _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": f"🎯 Sticker capture armed for mood '{mood_arg}'! Send any sticker right now to save it."}, timeout=10)
+                    continue
+
+                if text.startswith("__TG_STICKER__:"):
+                    stk_data = json.loads(text[len("__TG_STICKER__:"):])
+                    fid = str(stk_data.get("file_id") or "")
+                    em = str(stk_data.get("emoji") or "✨")
+                    cap_mood = (STATE.get("telegram_sticker_capture_mood") or "").strip()
+                    if cap_mood and fid:
+                        st_obj = load_telegram_stickers()
+                        st_obj["stickers"].append({"file_id": fid, "mood": cap_mood, "emoji": em, "pack": str(stk_data.get("set_name") or "captured"), "enabled": True})
+                        save_telegram_stickers(st_obj)
+                        STATE["telegram_sticker_capture_mood"] = ""
+                        _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": f"✅ Saved sticker ({em}) under mood '{cap_mood}'!"}, timeout=10)
+                        continue
+                    text = f"[User sent a Telegram sticker {em}]"
+                    low_t = text.lower()
+
+                if text.startswith("__TG_PHOTO__:"):
+                    try:
+                        p_pl = json.loads(text[len("__TG_PHOTO__:"):])
+                        p_fid = str((p_pl.get("photo") or {}).get("file_id") or "")
+                        cap_p = (p_pl.get("caption") or "").strip()
+                        gf = _tg_api_post(token, "getFile", {"file_id": p_fid}, timeout=12)
+                        fpath_r = ((gf.get("result") or {}).get("file_path")) or ""
+                        if fpath_r:
+                            dl_p = requests.get(f"https://api.telegram.org/file/bot{token}/{fpath_r}", timeout=25)
+                            dl_p.raise_for_status()
+                            ext_p = Path(fpath_r).suffix.lower() or ".jpg"
+                            CHAT_MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+                            sn = f"tg_photo_{int(time.time()*1000)}{ext_p}"
+                            (CHAT_MEDIA_DIR / sn).write_bytes(dl_p.content)
+                            text = (cap_p + f"\n[User sent photo saved at /chat_media/{sn}]").strip()
+                            low_t = text.lower()
+                    except Exception:
+                        text = "[User sent a photo]"
+                        low_t = text.lower()
+
                 if low_t in ("/start", "/help", "/menu", "/panel"):
-                    ai_n = WORKSPACE_CFG.get("ai_name", "Aether")
-                    lan_u = f"http://{get_local_lan_ip()}:{SERVER_PORT}"
-                    _tg_api_post(token, "sendMessage", {
-                        "chat_id": chat_id,
-                        "text": (
-                            f"⚡ {ai_n} Control Panel (v{APP_VERSION})\n"
-                            f"• Chat ID: {chat_id}\n"
-                            f"• Home Wi-Fi Web UI: {lan_u}\n"
-                            f"Tap a quick action below or send any message/command:"
-                        ),
-                        "reply_markup": _tg_build_control_keyboard()
-                    }, timeout=10)
+                    p_txt, p_kb = _tg_build_argo_panel(chat_id, page=1)
+                    _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": p_txt, "reply_markup": p_kb}, timeout=10)
                     continue
 
                 if text.startswith("avs_info:lan"):
@@ -7074,9 +7363,140 @@ def telegram_polling_worker():
                         _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": f"🎵 {sp_out}"}, timeout=10)
                     continue
 
+                if text.startswith("avs_thought:"):
+                    mid_str = text.split(":", 1)[1].strip()
+                    trace_obj = None
+                    try:
+                        with get_db() as conn:
+                            row_t = conn.execute("SELECT thought_trace FROM chat_messages WHERE id = ?", (int(mid_str),)).fetchone()
+                            if row_t and row_t["thought_trace"]:
+                                trace_obj = json.loads(row_t["thought_trace"])
+                    except Exception:
+                        trace_obj = None
+                    formatted_th = format_thought_trace_for_telegram(trace_obj)
+                    for part_th in avs_bridges.chunk_telegram_message(formatted_th):
+                        _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": part_th}, timeout=15)
+                    continue
+
+                if low_t == "/thought":
+                    trace_obj = None
+                    try:
+                        with get_db() as conn:
+                            row_t = conn.execute(
+                                "SELECT thought_trace FROM chat_messages WHERE session_id = ? AND role = 'assistant' AND COALESCE(thought_trace, '') != '' ORDER BY id DESC LIMIT 1",
+                                (f"telegram_{chat_id}",)
+                            ).fetchone()
+                            if row_t and row_t["thought_trace"]:
+                                trace_obj = json.loads(row_t["thought_trace"])
+                    except Exception:
+                        trace_obj = None
+                    formatted_th = format_thought_trace_for_telegram(trace_obj)
+                    for part_th in avs_bridges.chunk_telegram_message(formatted_th):
+                        _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": part_th}, timeout=15)
+                    continue
+
                 if text.startswith("avs_cmd:"):
                     text = text.split(":", 1)[1].strip()
                     low_t = text.lower()
+
+                if text.startswith("__TG_DOC__:"):
+                    try:
+                        payload_d = json.loads(text[len("__TG_DOC__:"):])
+                        doc_meta = payload_d.get("doc") or {}
+                        cap_raw = (payload_d.get("caption") or "").strip()
+                        orig_name = str(doc_meta.get("file_name") or f"telegram_doc_{int(time.time())}.txt")
+                        file_id = str(doc_meta.get("file_id") or "")
+                        fsize = int(doc_meta.get("file_size") or 0)
+                        ext_l = Path(orig_name).suffix.lower()
+                        if ext_l not in avs_cloud_sync.ALLOWED_SYNC_EXTS:
+                            _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": f"⚠️ Unsupported file type '{ext_l}'. Drop .pdf, .md, or .txt files to add them to Knowledge Tree (/priority_pdfs)!"}, timeout=10)
+                            continue
+                        if fsize > 20 * 1024 * 1024:
+                            _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": "⚠️ File exceeds Telegram Bot API 20 MB download limit. Use /sync (Nextcloud/WebDAV or Google Drive) for larger files!"}, timeout=10)
+                            continue
+                        gf = _tg_api_post(token, "getFile", {"file_id": file_id}, timeout=12)
+                        fpath_remote = ((gf.get("result") or {}).get("file_path")) or ""
+                        if not fpath_remote:
+                            _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": "⚠️ Could not retrieve file path from Telegram Bot API."}, timeout=10)
+                            continue
+                        dl_r = requests.get(f"https://api.telegram.org/file/bot{token}/{fpath_remote}", timeout=25)
+                        dl_r.raise_for_status()
+                        req_mode = "core" if "/core" in cap_raw.lower() else ("lore" if "/lore" in cap_raw.lower() else "")
+                        sub_clean = re.sub(r"/(?:core|lore)", "", cap_raw, flags=re.IGNORECASE).strip(" /\\")
+                        sub_clean = avs_cloud_sync._sanitize_rel_path(sub_clean) or "telegram_drops"
+                        safe_fn = avs_cloud_sync._safe_filename(orig_name, default_ext=ext_l)
+                        dest_p = avs_cloud_sync._safe_target_in_root(PDF_DIR, f"{sub_clean}/{safe_fn}")
+                        if not dest_p:
+                            raise ValueError("Invalid target path")
+                        dest_p.parent.mkdir(parents=True, exist_ok=True)
+                        dest_p.write_bytes(dl_r.content)
+                        rel_saved = dest_p.relative_to(PDF_DIR.resolve()).as_posix()
+                        sync_priority_files(force=True)
+                        if req_mode in ("core", "lore"):
+                            with get_db() as conn:
+                                conn.execute("UPDATE priority_pdfs SET file_mode = ?, manual_override = 1 WHERE filename = ?", (req_mode, rel_saved))
+                                conn.commit()
+                            sync_priority_files(force=True)
+                        st_info = PRIORITY_CACHE["file_stats"].get(rel_saved, {})
+                        _tg_api_post(token, "sendMessage", {
+                            "chat_id": chat_id,
+                            "text": (
+                                f"✅ Saved & indexed '{safe_fn}' ({len(dl_r.content):,} bytes) into /priority_pdfs/{rel_saved}!\n"
+                                f"• Mode: {(st_info.get('mode') or req_mode or 'lore').upper()} | Chunks: {st_info.get('chunks', 1)}\n"
+                                f"💡 Tip: Add '/core' or a subfolder name in the caption when dropping files."
+                            )
+                        }, timeout=12)
+                    except Exception as doc_err:
+                        _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": f"⚠️ Could not save dropped file: {doc_err}"}, timeout=10)
+                    continue
+
+                if low_t == "/files":
+                    flist = list_priority_files_info()
+                    if not flist:
+                        msg_f = "📄 Knowledge Tree (/priority_pdfs) is currently empty. Drop a .pdf, .md, or .txt right here in Telegram or run /sync!"
+                    else:
+                        rows_f = [f"• [{f['mode'].upper()}] {f['name']} ({f['chunks']} chunks)" for f in flist[:35]]
+                        msg_f = f"📄 Knowledge Tree ({len(flist)} files):\n" + "\n".join(rows_f) + "\n\n💡 Send /getfile <name> to download any file here, or drop a file directly into chat!"
+                    _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": msg_f[:3950]}, timeout=12)
+                    continue
+
+                if low_t.startswith("/getfile "):
+                    want_f = text.split(None, 1)[1].strip().lower()
+                    matched_p = None
+                    for cand_p in sorted(PDF_DIR.rglob("*")):
+                        if cand_p.is_file() and (want_f == cand_p.name.lower() or want_f in cand_p.relative_to(PDF_DIR).as_posix().lower()):
+                            matched_p = cand_p
+                            break
+                    if not matched_p:
+                        _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": f"⚠️ No file matching '{want_f}' found in /priority_pdfs. Run /files to list files."}, timeout=10)
+                    else:
+                        try:
+                            with open(matched_p, "rb") as fh_doc:
+                                requests.post(
+                                    f"https://api.telegram.org/bot{token}/sendDocument",
+                                    data={"chat_id": chat_id, "caption": f"📄 /priority_pdfs/{matched_p.relative_to(PDF_DIR).as_posix()}"},
+                                    files={"document": (matched_p.name, fh_doc)},
+                                    timeout=25,
+                                )
+                        except Exception as sd_err:
+                            _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": f"⚠️ Failed to send file: {sd_err}"}, timeout=10)
+                    continue
+
+                if low_t == "/sync" or low_t.startswith("/sync "):
+                    dir_arg = text.split(None, 1)[1].strip().lower() if " " in text else "pull"
+                    _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": f"☁️ Running Cloud Lore Vault sync ({dir_arg})..."}, timeout=8)
+                    cs_res = api_cloud_sync_run({"direction": dir_arg})
+                    _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": (cs_res.get("message") or cs_res.get("error") or "Done")[:3900]}, timeout=15)
+                    continue
+
+                if low_t.startswith("/pullurl "):
+                    u_parts = text.split(None, 2)
+                    target_u = u_parts[1].strip() if len(u_parts) > 1 else ""
+                    sub_u = u_parts[2].strip() if len(u_parts) > 2 else "cloud"
+                    _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": "🔗 Pulling remote link into Knowledge Tree..."}, timeout=8)
+                    pr = api_cloud_sync_pull_url({"url": target_u, "subfolder": sub_u})
+                    _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": (pr.get("message") or pr.get("error") or "Done")[:3900]}, timeout=15)
+                    continue
 
                 if low_t == "/stop":
                     STATE["stop_requested"] = True
@@ -7090,49 +7510,74 @@ def telegram_polling_worker():
 
                 TELEGRAM_QUEUE_STATE["active"] = True
                 TELEGRAM_QUEUE_STATE["last_user"] = text[:80]
-                _tg_api_post(token, "sendChatAction", {"chat_id": chat_id, "action": "typing"}, timeout=6)
+                typing_mode = (tg_cfg.get("typing_mode") or "native").strip().lower()
+                hb_action = _TelegramChatActionHeartbeat(token, chat_id, action="typing").start()
                 ai_lbl = WORKSPACE_CFG.get("ai_name", "Aether")
                 q_note = f" | Queue: {TELEGRAM_QUEUE_STATE['queued']}" if TELEGRAM_QUEUE_STATE["queued"] > 0 else ""
                 tg_t0 = time.time()
                 tg_steps = ["⏳ Received message — starting turn..."]
-                status_mid = _tg_edit_or_send_status(token, chat_id, 0, f"⚡ {ai_lbl} • Live Status (0.0s{q_note})\n• {tg_steps[0]}")
+                temp_status_mids = []
+                if typing_mode == "verbose":
+                    first_mid = _tg_edit_or_send_status(token, chat_id, 0, f"⚡ {ai_lbl} • Live Status (0.0s{q_note})\n• {tg_steps[0]}")
+                    if first_mid:
+                        temp_status_mids.append(first_mid)
                 last_edit_ts = [tg_t0]
 
-                def _on_tg_progress(step_s: str):
+                def _on_tg_progress(step_s: str, major: bool = False):
                     clean_s = str(step_s or "").strip()
+                    low_s = clean_s.lower()
+                    if any(k in low_s for k in ("screenshot", "image", "artwork")):
+                        hb_action.set_action("upload_photo")
+                    elif any(k in low_s for k in ("voice", "audio", "music", "tts")):
+                        hb_action.set_action("record_voice")
+                    elif any(k in low_s for k in ("file", "pdf", "export")):
+                        hb_action.set_action("upload_document")
+                    else:
+                        hb_action.set_action("typing")
                     if clean_s:
-                        # Update the trailing generating line in-place instead of spamming duplicate lines
                         if tg_steps and ("Generating" in clean_s or "generating" in clean_s) and ("Generating" in tg_steps[-1] or "generating" in tg_steps[-1]):
                             tg_steps[-1] = clean_s
                         elif not tg_steps or tg_steps[-1] != clean_s:
                             tg_steps.append(clean_s)
+                    if typing_mode != "verbose":
+                        return
                     now_t = time.time()
-                    if (now_t - last_edit_ts[0]) >= 2.0:
+                    if (now_t - last_edit_ts[0]) >= 1.8:
                         last_edit_ts[0] = now_t
                         elapsed = now_t - tg_t0
-                        _tg_api_post(token, "sendChatAction", {"chat_id": chat_id, "action": "typing"}, timeout=5)
                         body = "\n".join(f"• {s}" for s in tg_steps[-5:])
-                        _tg_edit_or_send_status(token, chat_id, status_mid, f"⚡ {ai_lbl} • Working ({elapsed:.1f}s{q_note})\n{body}")
+                        card_txt = f"⚡ {ai_lbl} • Working ({elapsed:.1f}s{q_note})\n{body}"
+                        cur_mid = temp_status_mids[-1] if temp_status_mids else 0
+                        upd_mid = _tg_edit_or_send_status(token, chat_id, cur_mid, card_txt)
+                        if upd_mid and upd_mid not in temp_status_mids:
+                            temp_status_mids.append(upd_mid)
 
+                active_tg_sid = _tg_get_active_session(chat_id)
                 try:
-                    reply, img_url, aud_url = generate_sync_reply_for_telegram(text, session_id=f"telegram_{chat_id}", progress_cb=_on_tg_progress)
+                    reply, img_url, aud_url, saved_mid, trace_obj = generate_sync_reply_for_telegram(
+                        text, session_id=active_tg_sid, progress_cb=_on_tg_progress, return_trace=True
+                    )
+                    reply, sticker_fid = extract_and_throttle_sticker(reply, chat_id)
                     chunks_out = avs_bridges.chunk_telegram_message(reply)
-                    # Zero-gap delivery: send the completed final reply FIRST, then remove the status card AFTER
-                    # (or edit the status card in-place when telegram.edit_in_place is enabled & reply fits in 1 chunk)
-                    edit_in_place = bool((WORKSPACE_CFG.get("telegram") or {}).get("edit_in_place", False))
-                    if edit_in_place and status_mid and len(chunks_out) == 1:
-                        ed_res = _tg_api_post(token, "editMessageText", {"chat_id": chat_id, "message_id": status_mid, "text": chunks_out[0]}, timeout=15)
-                        if not ed_res.get("ok"):
-                            _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": chunks_out[0]}, timeout=15)
-                            _tg_api_post(token, "deleteMessage", {"chat_id": chat_id, "message_id": status_mid}, timeout=6)
-                    else:
-                        for _tg_part in chunks_out:
-                            _tg_api_post(token, "sendMessage", {"chat_id": chat_id, "text": _tg_part}, timeout=15)
-                        if status_mid:
-                            _tg_api_post(token, "deleteMessage", {"chat_id": chat_id, "message_id": status_mid}, timeout=6)
+                    has_trace = bool(saved_mid and isinstance(trace_obj, dict) and (trace_obj.get("items") or []))
+                    reply_kb = (
+                        {"inline_keyboard": [[{"text": f"🧠 Show Thought Process ({len(trace_obj['items'])} steps)", "callback_data": f"avs_thought:{saved_mid}"}]]}
+                        if has_trace else None
+                    )
+                    hb_action.stop()
+                    for c_idx, _tg_part in enumerate(chunks_out):
+                        send_pl = {"chat_id": chat_id, "text": _tg_part}
+                        if reply_kb and c_idx == (len(chunks_out) - 1):
+                            send_pl["reply_markup"] = reply_kb
+                        _tg_api_post(token, "sendMessage", send_pl, timeout=15)
+                    for old_m in list(temp_status_mids):
+                        _tg_api_post(token, "deleteMessage", {"chat_id": chat_id, "message_id": old_m}, timeout=6)
+                    if sticker_fid:
+                        _tg_api_post(token, "sendSticker", {"chat_id": chat_id, "sticker": sticker_fid}, timeout=10)
                     _tg_send_media(token, chat_id, img_url=img_url, audio_url=aud_url)
                     TELEGRAM_QUEUE_STATE["processed_count"] = int(TELEGRAM_QUEUE_STATE.get("processed_count") or 0) + 1
                 finally:
+                    hb_action.stop()
                     TELEGRAM_QUEUE_STATE["active"] = False
                     TELEGRAM_QUEUE_STATE["queued"] = 0
         except Exception as e:
@@ -7255,6 +7700,8 @@ def _background_boot_sequence():
         threading.Thread(target=idle_sleep_watchdog, daemon=True).start()
         threading.Thread(target=_memory_compactor_watchdog, daemon=True).start()
         threading.Thread(target=bluesky_polling_worker, daemon=True).start()
+        if bool((WORKSPACE_CFG.get("vault_cloud") or {}).get("dlna_enabled", False)):
+            DLNA_SERVER.start((WORKSPACE_CFG.get("vault_cloud") or {}).get("dlna_name") or "AetherVault Media")
 
         boot_models = list_local_models()
         b_mode = WORKSPACE_CFG.get("brain_mode", "local_only")
@@ -7372,6 +7819,16 @@ def get_status():
         "api_vault": get_masked_api_vault(),
         "api_templates": API_PROVIDER_TEMPLATES,
         "telegram_status": STATE["telegram_status"],
+        "telegram_detected_chat_id": STATE.get("telegram_detected_chat_id", ""),
+        "telegram_sticker_capture": STATE.get("telegram_sticker_capture_mood", ""),
+        "telegram_stickers_count": len(load_telegram_stickers().get("stickers") or []),
+        "dlna": DLNA_SERVER.status() if "DLNA_SERVER" in globals() else {"enabled": False},
+        "vault_cloud": {
+            "enabled": bool((WORKSPACE_CFG.get("vault_cloud") or {}).get("enabled", True)),
+            "roots": avs_cloud_files.get_cloud_roots(BASE_DIR, WORKSPACE_CFG),
+            "m3u_url": f"http://{get_local_lan_ip()}:{SERVER_PORT}/cloud/playlist.m3u",
+        },
+        "custom_skills": load_custom_skills(),
         "telegram_queue": TELEGRAM_QUEUE_STATE,
         "bluesky": BSKY_STATE,
         "mind_map_nodes": len(MEMORY_COMPACTOR.mind_map),
@@ -7524,6 +7981,125 @@ def api_hardware_specs():
     return avs_hw.get_full_hardware_report()
 
 
+@app.get("/api/commands")
+def api_commands_cheatsheet():
+    """Returns the structured searchable Commands Cheat Sheet for Terminal, Telegram, Workbench & Hotkeys."""
+    return {
+        "version": APP_VERSION,
+        "terminal": [
+            {"cmd": "/help", "desc": "Show all available terminal commands", "runnable": True},
+            {"cmd": "/status", "desc": "Live active model, GPU/CPU status, RAM, mode & LAN URL", "runnable": True},
+            {"cmd": "/specs", "desc": "Deep SpecPulse hardware inventory (64-bit VRAM, CPU, live GPU)", "runnable": True},
+            {"cmd": "/stop", "desc": "Immediately halt an active generation loop", "runnable": True},
+            {"cmd": "/unload", "desc": "Unload local GGUF model from RAM/VRAM into Idle Sleep", "runnable": True},
+            {"cmd": "/wake", "desc": "Reload last local GGUF model from Idle Sleep", "runnable": True},
+            {"cmd": "/sleep 30", "desc": "Set Idle Auto-Unload watchdog timeout in minutes (0 = off)", "runnable": False},
+            {"cmd": "/toggle workbench_trust full_pc", "desc": "Flip Studio toggles live (workspace_mode, workbench_trust, theme_preset, offline_mode)", "runnable": False},
+            {"cmd": "/inject active_state | Working on Chapter 4", "desc": "Save a persistent fact straight into Priority #1 Memory Vault", "runnable": False},
+            {"cmd": "/py print(2 + 2)", "desc": "Run Python inside the isolated, killable subprocess Workbench", "runnable": False},
+            {"cmd": "/pip <package>", "desc": "Install any custom PyPI library into .venv", "runnable": False},
+            {"cmd": "/log 20", "desc": "Tail recent lines from error_audit.log locally (works offline)", "runnable": True},
+            {"cmd": "/telegram", "desc": "Check Telegram bridge connection & active queue status", "runnable": True},
+            {"cmd": "/update", "desc": "Commit-pinned GitHub Tree Sync OTA update (CRLF-safe, syntax-gated)", "runnable": True},
+            {"cmd": "/tunnel", "desc": "Show Wi-Fi LAN, Telegram & Cloudflare/Tailscale remote access guide", "runnable": True},
+            {"cmd": "/files", "desc": "List indexed files in Knowledge Tree (/priority_pdfs)", "runnable": True},
+            {"cmd": "/sync pull", "desc": "Sync Cloud Lore Vault (Nextcloud/WebDAV, Google Drive, or Local Mirror)", "runnable": True},
+            {"cmd": "/pullurl <url>", "desc": "Pull a shared Google Drive/Doc or raw file link into /priority_pdfs", "runnable": False},
+            {"cmd": "/sh <command>", "desc": "Execute a hidden host shell command (requires Full PC trust)", "runnable": False},
+        ],
+        "telegram": [
+            {"cmd": "/menu", "desc": "Open interactive Telegram inline Control Panel"},
+            {"cmd": "/thought", "desc": "Print full thought & tool process for the last reply on demand"},
+            {"cmd": "/status", "desc": "Check active model, RAM & Studio mode from your phone"},
+            {"cmd": "/specs", "desc": "Read host PC CPU, GPU & VRAM telemetry"},
+            {"cmd": "/queue", "desc": "Check Telegram worker queue & live step"},
+            {"cmd": "/unload", "desc": "Free host PC RAM/VRAM immediately"},
+            {"cmd": "/wake", "desc": "Wake sleeping local GGUF model"},
+            {"cmd": "/stop", "desc": "Cancel an in-progress generation"},
+            {"cmd": "Drop .pdf/.md/.txt file", "desc": "Send any lore file directly to Telegram (caption '/core' or subfolder) to save & index!"},
+            {"cmd": "/files", "desc": "List indexed files in Knowledge Tree (/priority_pdfs)"},
+            {"cmd": "/getfile <name>", "desc": "Download a lore/PDF file from your PC directly to Telegram"},
+            {"cmd": "/sync [pull|push|both]", "desc": "Sync Nextcloud/WebDAV, Google Drive, or Local Mirror remotely"},
+            {"cmd": "/pullurl <drive-url>", "desc": "Pull a Google Doc/Drive file link straight into /priority_pdfs"},
+            {"cmd": "/update", "desc": "Trigger GitHub OTA sync remotely"},
+            {"cmd": "/help", "desc": "Display Telegram controls & LAN info"},
+        ],
+        "workbench": [
+            {"cmd": "vault.weather()", "desc": "Live Open-Meteo weather & 2-day forecast for saved User Card / Map Pin"},
+            {"cmd": "vault.web('keywords')", "desc": "5-tier zero-key multi-engine live web & Google News search"},
+            {"cmd": "vault.fetch_url('https://...')", "desc": "Fetch and extract clean readable text from any webpage"},
+            {"cmd": "vault.spotify('current_track'|'play_liked'|'play'|'pause'|'next', 'q')", "desc": "Inspect or control Spotify playback & playlists"},
+            {"cmd": "vault.toggle('dlna_enabled', True)", "desc": "Toggle DLNA/UPnP Media Server for Roku TV & VLC ON/OFF"},
+            {"cmd": "vault.fs.relocate_app('C:/App', 'D:/App', mode='junction')", "desc": "Cross-drive app relocation with robocopy/rsync + NTFS junction"},
+            {"cmd": "vault.shortcuts.rewrite('C:/Old', 'D:/New')", "desc": "Batch-rewrite Desktop & Start Menu .lnk shortcuts cleanly"},
+            {"cmd": "vault.inspect('requests')", "desc": "Inspect exact library version, signatures & docstrings before calling"},
+            {"cmd": "vault.api_probe('http://127.0.0.1:8000')", "desc": "Discover OpenAPI/Swagger routes or JSON schema of any REST API"},
+            {"cmd": "vault.files('query') / vault.read_file('path') / vault.chunk_read('path', 0)", "desc": "Scan local PC/Steam/Drive folders or read huge files in chunks"},
+            {"cmd": "vault.write_desktop('note.txt', 'hello')", "desc": "Silently create or update files on Desktop/Documents"},
+            {"cmd": "vault.browser('https://...', private=True, search='')", "desc": "Open tabs or private windows silently in your desktop browser"},
+            {"cmd": "vault.osworld('screenshot'|'list_windows'|'open_app', 'arg')", "desc": "Desktop screenshots, window listing, app launcher & GUI control"},
+            {"cmd": "vault.memory_save('cat', 'fact') / vault.forget('keyword')", "desc": "Save or forget persistent Priority #1 memories"},
+            {"cmd": "vault.toggle('setting', value)", "desc": "Switch Studio modes, themes, or toggles programmatically"},
+            {"cmd": "vault.spellcheck(text) / vault.translate(text, to='es')", "desc": "Lore-safe offline spellcheck & portable Argos Translate"},
+            {"cmd": "vault.create_tool('name', code, test_code)", "desc": "Author, sandbox-test & hot-reload a permanent custom_tools/ plugin"},
+            {"cmd": "vault.cloud_sync('pull'|'push'|'both')", "desc": "Sync lore files with Nextcloud/WebDAV, Google Drive API v3, or Local Mirror"},
+            {"cmd": "vault.pull_url_to_lore('https://drive.google.com/...')", "desc": "Download a Google Doc/Drive or raw file link into /priority_pdfs"},
+            {"cmd": "vault.test_all(include_active=False)", "desc": "Run the isolated step-by-step Tool Gauntlet"},
+            {"cmd": "vault.help('topic')", "desc": "Show complete Workbench helper catalog inside Python"},
+        ],
+        "hotkeys": [
+            {"cmd": "Enter / Shift+Enter", "desc": "Send message / Insert newline in chat box"},
+            {"cmd": "Ctrl + K", "desc": "Start a brand-new chat session"},
+            {"cmd": "Esc", "desc": "Close active Studio Settings modal or Live Artifact drawer"},
+            {"cmd": "Ctrl + V / Drag & Drop", "desc": "Attach screenshots, PDFs, code, or text files directly into chat"},
+            {"cmd": "🌊 Stream Toggle", "desc": "Switch between live 60-FPS token streaming vs. send-when-finished with tok/s"},
+            {"cmd": "♾️ Uncapped Toggle", "desc": "Max context headroom + up to 8 chained Workbench rounds + auto-continue"},
+            {"cmd": "🌐 Web Toggle", "desc": "Auto-search web when a compact model hits its knowledge cutoff"},
+        ]
+    }
+
+
+@app.get("/api/cloud_sync/status")
+def api_cloud_sync_status():
+    cs = WORKSPACE_CFG.get("cloud_sync") or {}
+    return {
+        "ok": True,
+        "provider": cs.get("provider", "webdav"),
+        "subfolder": cs.get("subfolder", "cloud"),
+        "webdav_configured": bool((cs.get("webdav_url") or "").strip()),
+        "gdrive_configured": bool((cs.get("gdrive_folder_id") or "").strip() and ((cs.get("gdrive_api_key") or "").strip() or (cs.get("gdrive_bearer_token") or "").strip())),
+        "local_mirror_configured": bool((cs.get("local_mirror_path") or "").strip()),
+        "knowledge_files": len(list_priority_files_info()),
+    }
+
+@app.post("/api/cloud_sync/run")
+def api_cloud_sync_run(payload: dict):
+    direction = str((payload or {}).get("direction") or "pull").strip().lower()
+    cs_cfg = dict(WORKSPACE_CFG.get("cloud_sync") or {})
+    if isinstance((payload or {}).get("cloud_sync"), dict):
+        cs_cfg.update(payload["cloud_sync"])
+    res = avs_cloud_sync.run_configured_cloud_sync(
+        cs_cfg, pdf_dir=PDF_DIR, direction=direction, offline_mode=bool(STATE.get("offline_mode"))
+    )
+    if res.get("pulled"):
+        sync_priority_files(force=True)
+        STATE["ui_sync_needed"] = True
+    return res
+
+@app.post("/api/cloud_sync/pull_url")
+def api_cloud_sync_pull_url(payload: dict):
+    url = str((payload or {}).get("url") or "").strip()
+    subfolder = str((payload or {}).get("subfolder") or (WORKSPACE_CFG.get("cloud_sync") or {}).get("subfolder") or "cloud").strip()
+    filename_hint = str((payload or {}).get("filename") or "").strip()
+    res = avs_cloud_sync.pull_url_to_knowledge_tree(
+        url, pdf_dir=PDF_DIR, subfolder=subfolder, filename_hint=filename_hint, offline_mode=bool(STATE.get("offline_mode"))
+    )
+    if res.get("ok"):
+        sync_priority_files(force=True)
+        STATE["ui_sync_needed"] = True
+    return res
+
+
 @app.post("/api/terminal/exec")
 def api_terminal_exec(payload: dict):
     """Web Terminal / Manager Console endpoint for desktop & mobile browsers."""
@@ -7581,6 +8157,20 @@ def api_terminal_exec(payload: dict):
             f"        GPU: {gpus} (Load: {lv.get('gpu_util_percent')}% | VRAM Used: {lv.get('gpu_vram_used_mb')} MB)\n"
             f"        RAM: {lv.get('ram_used_gb')}/{(sp.get('ram') or {}).get('total_gb')} GB ({lv.get('ram_percent')}%)"
         )}
+    if cmd == "/files":
+        flist = list_priority_files_info()
+        lines_f = [f"  [{f['mode'].upper()}] {f['name']} ({f['chunks']} chunks)" for f in flist[:45]]
+        return {"ok": True, "output": f"[KNOWLEDGE TREE: {len(flist)} files]\n" + ("\n".join(lines_f) if lines_f else "  (empty)")}
+    if cmd == "/sync":
+        d_arg = arg.lower() if arg.lower() in ("pull", "push", "both") else "pull"
+        res_cs = api_cloud_sync_run({"direction": d_arg})
+        return {"ok": bool(res_cs.get("ok")), "output": f"[CLOUD SYNC] {res_cs.get('message') or res_cs.get('error')}"}
+    if cmd == "/pullurl":
+        p_toks = arg.split(None, 1)
+        if not p_toks:
+            return {"ok": False, "output": "[USAGE] /pullurl <google-drive-or-raw-url> [subfolder]"}
+        res_pu = api_cloud_sync_pull_url({"url": p_toks[0], "subfolder": p_toks[1] if len(p_toks) > 1 else "cloud"})
+        return {"ok": bool(res_pu.get("ok")), "output": f"[PULL URL] {res_pu.get('message') or res_pu.get('error')}"}
     if cmd == "/stop":
         STATE["stop_requested"] = True
         return {"ok": True, "output": "[STOP] Generation stop signal sent."}
@@ -7630,7 +8220,7 @@ def api_terminal_exec(payload: dict):
 
 OTA_TEXT_EXTS = {".py", ".html", ".json", ".md", ".svg", ".sh", ".bat", ".txt", ".gitattributes"}
 OTA_ROOT_FILES = {
-    "assistant_server.py", "ui_studio.html", "aethervault_logo.svg",
+    "assistant_server.py", "ui_studio.html", "aethervault_logo.svg", "release_emblem.svg",
     "AetherVault_Studio_Manual.pdf", "README.md", "manifest.json",
     ".gitattributes", "Launch.bat", "Launch.sh", "manager.py"
 }
@@ -7984,7 +8574,7 @@ async def mcp_jsonrpc(request: Request):
 def get_about_info():
     return {
         "project_name": "AetherVault Studio",
-        "version": f"v{APP_VERSION} Bluesky (Modular Guardrails, Workbench & AT Protocol Edition)",
+        "version": f"v{APP_VERSION} {APP_CODENAME} (Cloud Lore Sync, Telegram File Drop, Evergreen-Speed KV Core & Commands Hub)",
         "credits": "Made with ❤️ in Argentina by Enzeru, with the collaboration of Google Gemini.",
         "legal_addendum": (
             "All rights reserved to their respective owners. Every Python package (pip module) installed by the user, "
@@ -8056,34 +8646,49 @@ def upload_custom_asset(payload: dict):
     filename = Path(payload.get("filename") or "asset.png").name
     b64_data = payload.get("data_base64") or ""
     crop = payload.get("crop")
+    use_original = bool(payload.get("use_original", False))
     if not b64_data:
         raise HTTPException(400, "Missing image data")
     if "," in b64_data:
         b64_data = b64_data.split(",", 1)[1]
 
     raw_bytes = base64.b64decode(b64_data)
-    out_name = f"custom_{asset_type}_{int(time.time())}.png"
-    out_path = ASSETS_DIR / out_name
-
-    try:
-        img = Image.open(io.BytesIO(raw_bytes)).convert("RGBA")
-        w, h = img.size
-        if isinstance(crop, dict):
-            cx = max(0.0, min(1.0, float(crop.get("x", 0.0))))
-            cy = max(0.0, min(1.0, float(crop.get("y", 0.0))))
-            cw = max(0.05, min(1.0 - cx, float(crop.get("w", 1.0))))
-            ch = max(0.05, min(1.0 - cy, float(crop.get("h", 1.0))))
-            left = int(cx * w)
-            top = int(cy * h)
-            right = int((cx + cw) * w)
-            bottom = int((cy + ch) * h)
-            if right > left and bottom > top:
-                img = img.crop((left, top, right, bottom))
-        if asset_type == "avatar":
-            img = img.resize((256, 256), Image.Resampling.LANCZOS)
-        img.save(out_path, format="PNG")
-    except Exception:
+    orig_ext = Path(filename).suffix.lower()
+    if use_original and orig_ext in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"}:
+        out_name = f"custom_{asset_type}_{int(time.time())}{orig_ext}"
+        out_path = ASSETS_DIR / out_name
         out_path.write_bytes(raw_bytes)
+    else:
+        out_name = f"custom_{asset_type}_{int(time.time())}.png"
+        out_path = ASSETS_DIR / out_name
+        try:
+            img = Image.open(io.BytesIO(raw_bytes))
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGBA")
+            w, h = img.size
+            if isinstance(crop, dict) and not use_original:
+                cx = max(0.0, min(1.0, float(crop.get("x", 0.0))))
+                cy = max(0.0, min(1.0, float(crop.get("y", 0.0))))
+                cw = max(0.05, min(1.0 - cx, float(crop.get("w", 1.0))))
+                ch = max(0.05, min(1.0 - cy, float(crop.get("h", 1.0))))
+                left = int(cx * w)
+                top = int(cy * h)
+                right = int((cx + cw) * w)
+                bottom = int((cy + ch) * h)
+                if right > left and bottom > top:
+                    img = img.crop((left, top, right, bottom))
+            if asset_type == "avatar":
+                if max(img.size) > 512:
+                    img = img.resize((512, 512), Image.Resampling.LANCZOS)
+                elif img.size[0] != img.size[1]:
+                    side = min(512, max(img.size))
+                    img = img.resize((side, side), Image.Resampling.LANCZOS)
+            elif asset_type == "wallpaper":
+                if max(img.size) > 2560:
+                    img.thumbnail((2560, 2560), Image.Resampling.LANCZOS)
+            img.save(out_path, format="PNG", compress_level=3)
+        except Exception:
+            out_path.write_bytes(raw_bytes)
 
     url = f"/custom_asset/{out_name}"
     if asset_type == "avatar":
@@ -8099,6 +8704,22 @@ def serve_custom_asset(filename: str):
     if not fpath.exists():
         raise HTTPException(404, "Asset not found")
     return FileResponse(str(fpath))
+
+@app.get("/chat_media/{filename}")
+def serve_chat_media(filename: str):
+    fpath = CHAT_MEDIA_DIR / Path(filename).name
+    if not fpath.exists():
+        raise HTTPException(404, "Chat media not found")
+    return FileResponse(str(fpath), media_type=avs_cloud_files.guess_mime(fpath))
+
+@app.get("/avs_ui/{filename}")
+def serve_avs_ui_asset(filename: str):
+    safe = Path(filename).name
+    fpath = UI_ASSETS_DIR / safe
+    if not fpath.exists() or not fpath.is_file():
+        raise HTTPException(404, "UI asset not found")
+    mime = "text/css; charset=utf-8" if safe.endswith(".css") else ("application/javascript; charset=utf-8" if safe.endswith(".js") else "application/octet-stream")
+    return FileResponse(str(fpath), media_type=mime, headers={"Cache-Control": "no-cache"})
 
 @app.post("/parse_attachment")
 def parse_chat_attachment(payload: dict):
@@ -8120,12 +8741,22 @@ def parse_chat_attachment(payload: dict):
             return {"ok": True, "text": "\n\n".join(pages)[:(24000 if is_unrestricted_tokens_enabled() else 4500)]}
         except Exception as e:
             return {"ok": False, "text": f"[PDF read error: {e}]"}
-    elif ext in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+    elif ext in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".avif"}:
+        CHAT_MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+        safe_stem = re.sub(r"[^a-zA-Z0-9_-]", "_", Path(filename).stem)[:48] or "image"
+        saved_name = f"media_{int(time.time()*1000)}_{safe_stem}{ext}"
+        saved_path = CHAT_MEDIA_DIR / saved_name
+        saved_path.write_bytes(raw_bytes)
+        media_url = f"/chat_media/{saved_name}"
         try:
             img = Image.open(io.BytesIO(raw_bytes))
-            return {"ok": True, "text": f"[Attached Image '{filename}' | Resolution: {img.width}x{img.height}px | Mode: {img.mode}]"}
+            return {
+                "ok": True, "is_image": True, "media_url": media_url,
+                "width": img.width, "height": img.height, "size_bytes": len(raw_bytes),
+                "text": f"[Attached Image '{filename}' | Resolution: {img.width}x{img.height}px | Mode: {img.mode}]"
+            }
         except Exception:
-            return {"ok": True, "text": f"[Attached Image '{filename}']"}
+            return {"ok": True, "is_image": True, "media_url": media_url, "size_bytes": len(raw_bytes), "text": f"[Attached Image '{filename}']"}
     else:
         return {"ok": True, "text": raw_bytes.decode("utf-8", errors="ignore")[:(24000 if is_unrestricted_tokens_enabled() else 4500)]}
 
@@ -8188,13 +8819,13 @@ def export_workspace_zip(include_keys: int = 0):
     zip_path = BACKUPS_DIR / f"AetherVault_{safe_ai}_{stamp}.zip"
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        export_list = [DB_PATH, CONFIG_PATH, USER_PROFILE_CARD_PATH, GLOSSARY_PATH, PSEUDO_INDEX_JSON_PATH, PARTNER_EVOLUTION_PATH, ERROR_AUDIT_LOG_PATH, MANUAL_PDF_PATH, CUSTOM_REQS_PATH, BASE_DIR / "aethervault_logo.svg"]
+        export_list = [DB_PATH, CONFIG_PATH, USER_PROFILE_CARD_PATH, GLOSSARY_PATH, PSEUDO_INDEX_JSON_PATH, PARTNER_EVOLUTION_PATH, ERROR_AUDIT_LOG_PATH, MANUAL_PDF_PATH, CUSTOM_REQS_PATH, STICKERS_PATH, SKILLS_PATH, BASE_DIR / "aethervault_logo.svg"]
         if include_keys and API_VAULT_PATH.exists():
             export_list.append(API_VAULT_PATH)
         for single_file in export_list:
             if single_file.exists():
                 zf.write(single_file, arcname=single_file.name)
-        for folder in (PDF_DIR, MEMORY_DIR, CHAT_LOG_DIR, ASSETS_DIR, GEN_IMG_DIR, GEN_AUDIO_DIR, CUSTOM_TOOLS_DIR):
+        for folder in (PDF_DIR, MEMORY_DIR, CHAT_LOG_DIR, ASSETS_DIR, GEN_IMG_DIR, GEN_AUDIO_DIR, CUSTOM_TOOLS_DIR, VAULT_FILES_DIR):
             if folder.exists():
                 for f in folder.rglob("*"):
                     if f.is_file():
@@ -8512,8 +9143,23 @@ def manual_delete_memory(payload: dict):
 def get_session_messages(session_id: str):
     with get_db() as conn:
         c = conn.cursor()
-        c.execute("SELECT id, role, content, timestamp FROM chat_messages WHERE session_id = ? ORDER BY id ASC", (session_id,))
-        msgs = [{"id": r["id"], "role": r["role"], "content": r["content"], "timestamp": r["timestamp"]} for r in c.fetchall()]
+        c.execute("SELECT id, role, content, COALESCE(thought_trace, '') AS thought_trace, timestamp FROM chat_messages WHERE session_id = ? ORDER BY id ASC", (session_id,))
+        msgs = []
+        for r in c.fetchall():
+            trace_obj = None
+            raw_tr = (r["thought_trace"] or "").strip()
+            if raw_tr:
+                try:
+                    trace_obj = json.loads(raw_tr)
+                except Exception:
+                    trace_obj = None
+            msgs.append({
+                "id": r["id"],
+                "role": r["role"],
+                "content": r["content"],
+                "thought_trace": trace_obj,
+                "timestamp": r["timestamp"]
+            })
     return {"messages": msgs}
 
 @app.get("/session/{session_id}/export_md")
@@ -8656,9 +9302,39 @@ def chat_stream(payload: dict):
                 att_lim = 20000 if is_unrestricted_tokens_enabled() else 3500
                 user_msg = f"{user_msg}\n\n[Attached File: {attached_name}]\n{attached_text[:att_lim]}".strip()
 
+            turn_t0 = time.time()
+            turn_trace_items = []
+
+            def _record_trace(kind: str, **kw):
+                entry = {"kind": kind, "t": round(time.time() - turn_t0, 1)}
+                entry.update(kw)
+                turn_trace_items.append(entry)
+
+            def _build_trace_payload(img_u=None, aud_u=None) -> dict:
+                return {
+                    "elapsed_sec": round(time.time() - turn_t0, 1),
+                    "items": turn_trace_items[-80:],
+                    "image_url": img_u,
+                    "audio_url": aud_u
+                }
+
             def emit_step(txt: str):
                 set_step(txt)
+                _record_trace("step", text=txt)
                 return json.dumps({"type": "step", "text": txt}) + "\n"
+
+            def emit_thought(txt: str, label: str = "Reasoning"):
+                clean_th = (txt or "").strip()
+                if not clean_th:
+                    return ""
+                _record_trace("thought", label=label, text=clean_th[:8000])
+                return json.dumps({"type": "thought", "label": label, "text": clean_th[:8000]}) + "\n"
+
+            def emit_workbench_io(tool: str, code: str, output: str):
+                c_s = (code or "")[:1800]
+                o_s = (output or "")[:3500]
+                _record_trace("workbench_io", tool=tool, code=c_s, output=o_s)
+                return json.dumps({"type": "workbench_io", "tool": tool, "code": c_s, "output": o_s}) + "\n"
 
             with get_db() as conn:
                 c = conn.cursor()
@@ -8670,14 +9346,15 @@ def chat_stream(payload: dict):
                 elif row["title"] in ("New Conversation", "Main Workspace", "Hanging Out"):
                     c.execute("UPDATE chat_sessions SET title = ? WHERE id = ?", (short_title, session_id))
 
-                c.execute("INSERT INTO chat_messages (session_id, role, content) VALUES (?, 'user', ?)", (session_id, user_msg))
+                _u_media = payload.get("attached_media_urls") or []
+                _u_trace_s = json.dumps({"image_url": _u_media[0] if _u_media else None, "media_urls": _u_media}, ensure_ascii=False) if _u_media else ""
+                c.execute("INSERT INTO chat_messages (session_id, role, content, thought_trace) VALUES (?, 'user', ?, ?)", (session_id, user_msg, _u_trace_s))
                 conn.commit()
 
                 c.execute("SELECT role, content FROM chat_messages WHERE session_id = ? ORDER BY id DESC LIMIT 6", (session_id,))
                 recent_turns = [{"role": r["role"], "content": r["content"]} for r in reversed(c.fetchall())]
 
-            harvested_notes = harvest_passive_user_notes(user_msg)
-            sync_pseudo_memory_and_index()
+            # Evergreen-Speed Hot Path: classify immediately; run passive memory harvest & pseudo-index sync asynchronously!
             gear, gear_reason = classify_task_gear(user_msg, attached_name, recent_turns)
             generated_img_url = None
             generated_audio_url = None
@@ -8705,7 +9382,7 @@ def chat_stream(payload: dict):
                     q_g1 = g1_fresh_q if g1_fresh else clean_web_search_query(user_msg)
                     yield emit_step(f"🌐 Gear 1 Auto-Web Grounding: looking up '{q_g1[:40]}' online...")
                     g1_res = search_web(q_g1)[:1300]
-                    yield json.dumps({"type": "workbench_io", "tool": "auto_web_search", "code": f"vault.web({q_g1!r})", "output": g1_res[:900]}) + "\n"
+                    yield emit_workbench_io("auto_web_search", f"vault.web({q_g1!r})", g1_res[:900])
                     reflex_web_ctx = f"[LIVE WEB RESULTS FOR '{q_g1}' — ANSWER USING THESE REAL FACTS]:\n{g1_res}"
                     g1_web_ran = True
                 messages = build_safe_messages(reflex_sys, reflex_web_ctx, recent_turns, max_turns=3)
@@ -8747,24 +9424,33 @@ def chat_stream(payload: dict):
                             time.sleep(0.005)
                         reflex_reply += delta
 
-                        if any(tag in reflex_reply for tag in ("[[DEEP]]", "[DEEP]", "<tool_call>", "[[FILES:", "[[LORE:", "[[OSWORLD:", "[[SPOTIFY:", "[[CHATS:", "[[SELF:", "[[MUSIC:", "[[IMAGE:", "[[PCINFO", "[[PYTHON:")):
+                        if any(tag in reflex_reply for tag in ("[[DEEP]]", "[DEEP]", "<tool_call>", "```workbench", "vault.", "[[FILES:", "[[LORE:", "[[OSWORLD:", "[[SPOTIFY:", "[[CHATS:", "[[SELF:", "[[MUSIC:", "[[IMAGE:", "[[PCINFO", "[[PYTHON:")):
                             escalated_to_deep = True
                             bracket_hold = ""
                             break
 
-                        if has_repetition_delirium(reflex_reply):
+                        if (len(reflex_reply) & 15) == 0 and has_repetition_delirium(reflex_reply):
                             err_card = format_predetermined_error("ERR_DELIRIUM_LOOP")
                             yield json.dumps({"type": "issue", "issue": err_card}) + "\n"
                             yield emit_step(f"🛡️ {err_card['code']}: Cut repetition loop cleanly.")
                             break
 
-                        if "<think>" in delta:
+                        if any(tg in delta for tg in ("<think>", "<|think|>", "<|thought|>")):
                             in_think = True
-                            delta = delta.replace("<think>", "")
-                        if "</think>" in delta:
-                            in_think = False
-                            delta = delta.split("</think>", 1)[1]
+                            for tg in ("<think>", "<|think|>", "<|thought|>"):
+                                delta = delta.replace(tg, "")
+                        for end_tg in ("</think>", "<|/think|>", "<|/thought|>"):
+                            if end_tg in delta:
+                                in_think = False
+                                _p_th = delta.split(end_tg, 1)
+                                _g1_th_buf = locals().get("_g1_th_buf", "") + _p_th[0]
+                                if _g1_th_buf.strip():
+                                    yield emit_thought(_g1_th_buf.strip(), "Model Reasoning")
+                                _g1_th_buf = ""
+                                delta = _p_th[1]
+                                break
                         if in_think:
+                            _g1_th_buf = locals().get("_g1_th_buf", "") + delta
                             continue
 
                         # Hold back potential [[...]] tag tokens until verified
@@ -8797,31 +9483,41 @@ def chat_stream(payload: dict):
                         fs_q = clean_web_search_query(fast_search_m.group(1).strip())
                         yield emit_step(f"🌐 Gear 1 Live Web Lookup: '{fs_q[:38]}'...")
                         fs_out = search_web(fs_q)[:1400]
-                        yield json.dumps({"type": "workbench_io", "tool": "web_search", "code": f"vault.web({fs_q!r})", "output": fs_out[:900]}) + "\n"
+                        yield emit_workbench_io("web_search", f"vault.web({fs_q!r})", fs_out[:900])
                         clean_reflex = synthesize_tool_followup(reflex_sys, recent_turns[-3:], re.sub(r"\[\[SEARCH:[^\]]+\]\]", "", clean_reflex).strip() or "Checking online.", f"[Live Web Search Results for '{fs_q}']:\n{fs_out}", cfg, user_name, ai_name)
                         g1_web_ran = True
                     elif not g1_web_ran and is_auto_web_search_enabled() and not STATE["stop_requested"] and detect_model_uncertainty(clean_reflex) and is_query_searchable_for_rescue(user_msg):
                         rq = clean_web_search_query(user_msg)
                         yield emit_step(f"🌐 Caught knowledge gap — auto-searching web for '{rq[:40]}'...")
                         r_out = search_web(rq)[:1400]
-                        yield json.dumps({"type": "workbench_io", "tool": "uncertainty_web_rescue", "code": f"vault.web({rq!r})", "output": r_out[:900]}) + "\n"
+                        yield emit_workbench_io("uncertainty_web_rescue", f"vault.web({rq!r})", r_out[:900])
                         clean_reflex = synthesize_tool_followup(reflex_sys, recent_turns[-3:], clean_reflex, f"[Auto-Web Knowledge Rescue Results for '{rq}']:\n{r_out}", cfg, user_name, ai_name)
                     _is_asst_g1 = (WORKSPACE_CFG.get("workspace_mode", "assistant") == "assistant")
                     clean_reflex = avs_model_polish.normalize_model_output(clean_reflex, ai_name=ai_name, user_name=user_name, is_assistant_mode=_is_asst_g1)
                     _g1_fin = avs_turn_pipeline.finalize_turn_reply(clean_reflex, ai_name=ai_name, user_name=user_name, evidence_pool=f"{PRIORITY_CACHE.get('core_rules_text', '')} {WORKSPACE_CFG.get('persona_prompt', '')}")
                     clean_reflex, _g1_warns = referee_lore_and_grounding(_g1_fin["reply"], user_msg, ai_name, "")
                     STATE["last_debug"]["referee_warnings"] = _g1_warns
-                    update_partner_evolution(user_msg, clean_reflex)
+                    def _bg_post_g1(_u=user_msg, _r=clean_reflex):
+                        try:
+                            harvest_passive_user_notes(_u)
+                            update_partner_evolution(_u, _r)
+                            sync_pseudo_memory_and_index()
+                            export_chats_to_txt_files()
+                        except Exception:
+                            pass
+                    threading.Thread(target=_bg_post_g1, daemon=True).start()
                     if STATE["stop_requested"]:
                         clean_reflex = f"{clean_reflex} *(⏹️ Stopped)*".strip()
                     if not clean_reflex:
                         clean_reflex = "..."
+                    _g1_trace = _build_trace_payload(None, None)
+                    _g1_trace_json = json.dumps(_g1_trace, ensure_ascii=False)
                     with get_db() as conn:
-                        conn.execute("INSERT INTO chat_messages (session_id, role, content) VALUES (?, 'assistant', ?)", (session_id, clean_reflex))
+                        cur_g1 = conn.execute("INSERT INTO chat_messages (session_id, role, content, thought_trace) VALUES (?, 'assistant', ?, ?)", (session_id, clean_reflex, _g1_trace_json))
+                        saved_g1_id = cur_g1.lastrowid
                         conn.execute("UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (session_id,))
                         conn.commit()
-                    export_chats_to_txt_files()
-                    yield json.dumps({"type": "done", "reply": clean_reflex, "image_url": None}) + "\n"
+                    yield json.dumps({"type": "done", "reply": clean_reflex, "image_url": None, "message_id": saved_g1_id, "thought_trace": _g1_trace}) + "\n"
                     return
                 else:
                     yield emit_step("🧠 Model self-escalated from Reflex -> Gear 2 (Deep Mode)! Loading full Lore & Tools...")
@@ -8853,12 +9549,11 @@ def chat_stream(payload: dict):
                     if ph == "start":
                         yield emit_step(f"🧪 [{gevt['index']}/{gevt['total']}] Testing {gevt['icon']} {gevt['label']}...")
                     elif ph == "result":
-                        yield json.dumps({
-                            "type": "workbench_io",
-                            "tool": f"gauntlet [{gevt['index']}/{gevt['total']}] {gevt['id']}",
-                            "code": f"vault.test_step({gevt['id']!r})",
-                            "output": f"{gevt['badge']} {gevt['status']} ({gevt['ms']}ms) — {gevt['detail']}"
-                        }) + "\n"
+                        yield emit_workbench_io(
+                            f"gauntlet [{gevt['index']}/{gevt['total']}] {gevt['id']}",
+                            f"vault.test_step({gevt['id']!r})",
+                            f"{gevt['badge']} {gevt['status']} ({gevt['ms']}ms) — {gevt['detail']}"
+                        )
                     elif ph == "summary":
                         gauntlet_scorecard = gevt.get("scorecard") or ""
                         if gevt.get("image_url"):
@@ -8911,7 +9606,7 @@ def chat_stream(payload: dict):
                 sq_auto = clean_web_search_query(user_msg)
                 yield emit_step(f"🌐 Pre-executing Clean Web Search for '{sq_auto[:45]}'...")
                 w_res_pre = search_web(sq_auto)
-                yield json.dumps({"type": "workbench_io", "tool": "web_search", "code": f"vault.web({sq_auto!r})", "output": w_res_pre[:900]}) + "\n"
+                yield emit_workbench_io("web_search", f"vault.web({sq_auto!r})", w_res_pre[:1200])
                 dynamic_turn_context += f"[SYSTEM TOOL EXECUTED — LIVE WEB SEARCH FOR '{sq_auto}']:\n{w_res_pre}\n"
                 web_searched_this_turn = True
             elif not is_gauntlet_req:
@@ -8919,7 +9614,7 @@ def chat_stream(payload: dict):
                 if is_fresh_q:
                     yield emit_step(f"🌐 Fresh/Post-Cutoff Topic Detected — auto-searching web for '{fresh_sq[:42]}'...")
                     w_res_fresh = search_web(fresh_sq)
-                    yield json.dumps({"type": "workbench_io", "tool": "auto_web_grounding", "code": f"vault.web({fresh_sq!r})", "output": w_res_fresh[:900]}) + "\n"
+                    yield emit_workbench_io("auto_web_grounding", f"vault.web({fresh_sq!r})", w_res_fresh[:1200])
                     dynamic_turn_context += f"[AUTO-WEB GROUNDING — LIVE INTERNET FACTS FOR '{fresh_sq}' (TRUST THESE OVER OUTDATED WEIGHTS!)]:\n{w_res_fresh}\n"
                     web_searched_this_turn = True
 
@@ -8963,7 +9658,7 @@ def chat_stream(payload: dict):
                     STATE["spotify_readonly_turn"] = True
                     yield emit_step("🎵 Reading currently playing Spotify track (Read-Only — playback locked)...")
                     sp_cur_out = control_spotify("current_track")
-                    yield json.dumps({"type": "workbench_io", "tool": "spotify_control", "code": "vault.spotify('current_track')", "output": sp_cur_out[:900]}) + "\n"
+                    yield emit_workbench_io("spotify_control", "vault.spotify('current_track')", sp_cur_out[:1200])
                     dynamic_turn_context += (
                         f"[SYSTEM TOOL EXECUTED — SPOTIFY CURRENT TRACK (READ-ONLY — DO NOT CHANGE PLAYBACK OR CALL vault.spotify('play'/'next')!)]:\n"
                         f"{sp_cur_out}\n"
@@ -8976,7 +9671,7 @@ def chat_stream(payload: dict):
                     act_l = "play_liked" if want_play else "liked"
                     yield emit_step(f"🎵 Accessing Spotify Liked Songs ({act_l})...")
                     sp_l_out = control_spotify(act_l, "")
-                    yield json.dumps({"type": "workbench_io", "tool": "spotify_control", "code": f"vault.spotify({act_l!r})", "output": sp_l_out[:900]}) + "\n"
+                    yield emit_workbench_io("spotify_control", f"vault.spotify({act_l!r})", sp_l_out[:1200])
                     if act_l == "play_liked": STATE["spotify_mutated_this_turn"] = sp_l_out
                     dynamic_turn_context += f"[SYSTEM TOOL EXECUTED — SPOTIFY LIKED SONGS (ALREADY DONE — DO NOT CALL vault.spotify AGAIN)]:\n{sp_l_out}\n"
                 # 3. Full Playlists (list or start full playlist context so it loops/plays continuously!)
@@ -8991,7 +9686,7 @@ def chat_stream(payload: dict):
                         pl_q = ""
                     yield emit_step(f"🎵 Accessing Spotify Playlists ({act_pl}{': ' + pl_q if pl_q else ''})...")
                     sp_pl_out = control_spotify(act_pl, pl_q)
-                    yield json.dumps({"type": "workbench_io", "tool": "spotify_control", "code": f"vault.spotify({act_pl!r}, {pl_q!r})", "output": sp_pl_out[:900]}) + "\n"
+                    yield emit_workbench_io("spotify_control", f"vault.spotify({act_pl!r}, {pl_q!r})", sp_pl_out[:1200])
                     dynamic_turn_context += f"[SYSTEM TOOL EXECUTED — SPOTIFY PLAYLIST]:\n{sp_pl_out}\n"
                 # 4. Full Album playback
                 elif "album" in low_msg and not is_spotify_readonly and any(k in low_msg for k in ("play", "put on", "start", "loop")):
@@ -8999,7 +9694,7 @@ def chat_stream(payload: dict):
                     alb_q = m_alb.group(1).strip() if m_alb else ""
                     yield emit_step(f"🎵 Starting full Spotify album '{alb_q}'...")
                     sp_al_out = control_spotify("play_album", alb_q)
-                    yield json.dumps({"type": "workbench_io", "tool": "spotify_control", "code": f"vault.spotify('play_album', {alb_q!r})", "output": sp_al_out[:900]}) + "\n"
+                    yield emit_workbench_io("spotify_control", f"vault.spotify('play_album', {alb_q!r})", sp_al_out[:1200])
                     dynamic_turn_context += f"[SYSTEM TOOL EXECUTED — SPOTIFY ALBUM]:\n{sp_al_out}\n"
                 elif any(k in low_msg for k in ("pause", "stop music", "stop spotify")):
                     yield emit_step("🎵 Pausing Spotify playback...")
@@ -9147,17 +9842,20 @@ def chat_stream(payload: dict):
                             yield emit_step(f"🛡️ {err_card['code']}: Cut repetition loop cleanly.")
                             break
 
-                        if "<think>" in delta:
+                        if any(tg in delta for tg in ("<think>", "<|think|>", "<|thought|>")):
                             in_think_block = True
-                            delta = delta.replace("<think>", "")
-                        if "</think>" in delta:
-                            in_think_block = False
-                            parts = delta.split("</think>", 1)
-                            think_buffer += parts[0]
-                            if think_buffer.strip():
-                                yield emit_step(f"🧠 DeepSeek Reasoning: {think_buffer.strip()[:180]}...")
-                            delta = parts[1]
-                            think_buffer = ""
+                            for tg in ("<think>", "<|think|>", "<|thought|>"):
+                                delta = delta.replace(tg, "")
+                        for end_tg in ("</think>", "<|/think|>", "<|/thought|>"):
+                            if end_tg in delta:
+                                in_think_block = False
+                                parts = delta.split(end_tg, 1)
+                                think_buffer += parts[0]
+                                if think_buffer.strip():
+                                    yield emit_thought(think_buffer.strip(), f"Model Reasoning (Pass {agent_round+1})")
+                                delta = parts[1]
+                                think_buffer = ""
+                                break
                         if in_think_block:
                             think_buffer += delta
                             continue
@@ -9197,7 +9895,12 @@ def chat_stream(payload: dict):
                         pending_calls = inline_calls
                         round_reply = cleaned_round
 
+                    if think_buffer.strip():
+                        yield emit_thought(think_buffer.strip(), f"Model Reasoning (Pass {agent_round+1})")
+                        think_buffer = ""
                     if pending_calls and not STATE["stop_requested"] and agent_round < (max_rounds - 1):
+                        if cleaned_round and len(cleaned_round.strip()) >= 8:
+                            yield emit_thought(cleaned_round.strip(), f"Pre-Tool Thought (Round {agent_round+1})")
                         obs_blocks = []
                         any_tool_failed = False
                         any_auto_researched = False
@@ -9223,12 +9926,11 @@ def chat_stream(payload: dict):
                                 obs_txt, t_img, t_aud = execute_unified_tool(pc["name"], coerce_primitive_args(pc["arguments"]), session_id)
                             if pc["name"] == "web_search" or (pc["name"] == "run_workbench" and any(wk in code_preview for wk in ("vault.web(", "vault.docs(", "vault.search("))):
                                 web_searched_this_turn = True
-                            yield json.dumps({
-                                "type": "workbench_io",
-                                "tool": pc["name"] + (" (Auto-Researched Fix)" if any_auto_researched else ""),
-                                "code": code_preview[:900],
-                                "output": (obs_txt or "")[:2000]
-                            }) + "\n"
+                            yield emit_workbench_io(
+                                pc["name"] + (" (Auto-Researched Fix)" if any_auto_researched else ""),
+                                code_preview[:1800],
+                                (obs_txt or "")[:3500]
+                            )
                             if STATE.get("ui_sync_needed"):
                                 STATE["ui_sync_needed"] = False
                                 yield json.dumps({"type": "sync_status"}) + "\n"
@@ -9474,7 +10176,7 @@ def chat_stream(payload: dict):
                         rescue_q = clean_web_search_query(user_msg)
                         yield emit_step(f"🌐 Caught knowledge gap — auto-searching web for '{rescue_q[:42]}'...")
                         rescue_out = search_web(rescue_q)
-                        yield json.dumps({"type": "workbench_io", "tool": "uncertainty_web_rescue", "code": f"vault.web({rescue_q!r})", "output": rescue_out[:950]}) + "\n"
+                        yield emit_workbench_io("uncertainty_web_rescue", f"vault.web({rescue_q!r})", rescue_out[:1200])
                         web_searched_this_turn = True
                         full_reply = synthesize_tool_followup(
                             static_sys_prompt,
@@ -9503,14 +10205,24 @@ def chat_stream(payload: dict):
                 STATE["spotify_readonly_turn"] = False
                 set_step("Idle")
 
+            _g2_trace = _build_trace_payload(generated_img_url, generated_audio_url)
+            _g2_trace_json = json.dumps(_g2_trace, ensure_ascii=False)
             with get_db() as conn:
-                conn.execute("INSERT INTO chat_messages (session_id, role, content) VALUES (?, 'assistant', ?)", (session_id, full_reply))
+                cur_g2 = conn.execute("INSERT INTO chat_messages (session_id, role, content, thought_trace) VALUES (?, 'assistant', ?, ?)", (session_id, full_reply, _g2_trace_json))
+                saved_g2_id = cur_g2.lastrowid
                 conn.execute("UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (session_id,))
                 conn.commit()
 
-            update_partner_evolution(user_msg, full_reply)
-            export_chats_to_txt_files()
-            yield json.dumps({"type": "done", "reply": full_reply, "image_url": generated_img_url, "audio_url": generated_audio_url}) + "\n"
+            def _bg_post_g2(_u=user_msg, _r=full_reply):
+                try:
+                    harvest_passive_user_notes(_u)
+                    update_partner_evolution(_u, _r)
+                    sync_pseudo_memory_and_index()
+                    export_chats_to_txt_files()
+                except Exception:
+                    pass
+            threading.Thread(target=_bg_post_g2, daemon=True).start()
+            yield json.dumps({"type": "done", "reply": full_reply, "image_url": generated_img_url, "audio_url": generated_audio_url, "message_id": saved_g2_id, "thought_trace": _g2_trace}) + "\n"
 
         except Exception as e:
             tb = traceback.format_exc()
@@ -9846,19 +10558,30 @@ def get_temp_cache_stats(force: bool = False) -> dict:
     _TEMP_CACHE_STATS_MEM.update({"ts": now, "data": out})
     return out
 
+_LAST_GEAR_HASH = {}
+
 def record_temp_gear_cache(gear: str, sys_prompt_text: str):
-    """Saves the evaluated static prefix & metadata for Gear 1 (reflex) and Gear 2 (deep) in %TEMP%."""
+    """Caches static KV prefix metadata in .temp_cache only when changed (zero disk write on cache hits)."""
     try:
-        TEMP_SESSION_DIR.mkdir(parents=True, exist_ok=True)
-        cache_file = TEMP_SESSION_DIR / f"gear_{gear}_prefix.json"
-        payload = {
-            "gear": gear,
-            "model": STATE.get("current_model") or "None",
-            "updated_at": time.strftime("%H:%M:%S"),
-            "prefix_chars": len(sys_prompt_text),
-            "prefix_hash": hash(sys_prompt_text[:600])
-        }
-        cache_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        h_val = hash(sys_prompt_text[:600])
+        if _LAST_GEAR_HASH.get(gear) == h_val:
+            return
+        _LAST_GEAR_HASH[gear] = h_val
+        def _bg_write():
+            try:
+                TEMP_SESSION_DIR.mkdir(parents=True, exist_ok=True)
+                cache_file = TEMP_SESSION_DIR / f"gear_{gear}_prefix.json"
+                payload = {
+                    "gear": gear,
+                    "model": STATE.get("current_model") or "None",
+                    "updated_at": time.strftime("%H:%M:%S"),
+                    "prefix_chars": len(sys_prompt_text),
+                    "prefix_hash": h_val
+                }
+                cache_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+        threading.Thread(target=_bg_write, daemon=True).start()
     except Exception:
         pass
 
@@ -10996,6 +11719,14 @@ def serve_logo_svg():
         return FileResponse(str(LOGO_SVG_PATH), media_type="image/svg+xml")
     return HTMLResponse("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><polygon points='32,4 58,18 58,46 32,60 6,46 6,18' fill='#1e1b4b' stroke='#8b5cf6' stroke-width='4'/></svg>", media_type="image/svg+xml")
 
+EMBLEM_SVG_PATH = BASE_DIR / "release_emblem.svg"
+
+@app.get("/emblem.svg")
+def serve_emblem_svg():
+    if EMBLEM_SVG_PATH.exists():
+        return FileResponse(str(EMBLEM_SVG_PATH), media_type="image/svg+xml")
+    return serve_logo_svg()
+
 @app.get("/favicon.ico")
 def serve_favicon():
     return serve_logo_svg()
@@ -11280,6 +12011,573 @@ def serve_ui():
         "<p>Place <code>ui_studio.html</code> in the same folder as <code>assistant_server.py</code> and hit Refresh (F5).</p>"
         "</body>"
     )
+
+
+
+# =====================================================================
+# 15. v7.1 LAMPPOST ENGINE: VAULT CLOUD, DLNA/UPnP, CUSTOM /SKILLS,
+#     GUIDED TELEGRAM WIZARD, STICKERS, TYPING HEARTBEAT & ARGO MENU
+# =====================================================================
+DLNA_SERVER = avs_dlna_server.DLNAMediaServer(
+    get_lan_ip_fn=get_local_lan_ip,
+    get_port_fn=lambda: SERVER_PORT,
+    get_roots_fn=lambda: avs_cloud_files.get_cloud_roots(BASE_DIR, WORKSPACE_CFG),
+)
+atexit.register(lambda: DLNA_SERVER.stop())
+
+DEFAULT_CUSTOM_SKILLS = [
+    {"id": "explain", "category": "Quick Actions", "label": "Explain clearly", "prompt": "Explain the following clearly and concisely:\n\n"},
+    {"id": "summarize", "category": "Quick Actions", "label": "Summarize key points", "prompt": "Summarize the key points of this in crisp bullets:\n\n"},
+    {"id": "paraphrase", "category": "Rewrite", "label": "Paraphrase", "prompt": "Paraphrase this cleanly while keeping the exact meaning:\n\n"},
+    {"id": "improve", "category": "Rewrite", "label": "Polish & Improve", "prompt": "Polish and improve the flow and clarity of this text:\n\n"},
+    {"id": "tone_casual", "category": "Change Tone", "label": "Tone / Casual", "prompt": "Rewrite this in a relaxed, conversational tone:\n\n"},
+    {"id": "tone_pro", "category": "Change Tone", "label": "Tone / Professional", "prompt": "Rewrite this in a crisp, professional tone:\n\n"},
+    {"id": "tone_short", "category": "Change Tone", "label": "Shorten", "prompt": "Make this shorter and punchier without losing the point:\n\n"},
+    {"id": "tone_expand", "category": "Change Tone", "label": "Expand", "prompt": "Expand this with richer detail and examples:\n\n"},
+    {"id": "lore_check", "category": "Lore & Writing", "label": "Check Lore Consistency", "prompt": "Check this against my active Lore and notes for any timeline or character inconsistencies:\n\n"},
+    {"id": "scene_beat", "category": "Lore & Writing", "label": "Continue Scene Beat", "prompt": "Write the next immersive story beat in-character, continuing naturally from:\n\n"},
+    {"id": "pc_dlna_on", "category": "PC & Media", "label": "Turn DLNA Server ON (Roku/VLC)", "prompt": "Turn on the DLNA media server so I can stream to my Roku TV and VLC."},
+    {"id": "pc_dlna_off", "category": "PC & Media", "label": "Turn DLNA Server OFF", "prompt": "Turn off the DLNA media server now."},
+]
+
+def load_custom_skills() -> list:
+    if SKILLS_PATH.exists():
+        try:
+            data = json.loads(SKILLS_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, list) and data:
+                return data
+        except Exception:
+            pass
+    return list(DEFAULT_CUSTOM_SKILLS)
+
+def save_custom_skills(skills: list):
+    SKILLS_PATH.write_text(json.dumps(skills, indent=2, ensure_ascii=False), encoding="utf-8")
+
+@app.get("/api/skills")
+def api_get_skills():
+    return {"ok": True, "skills": load_custom_skills()}
+
+@app.post("/api/skills/save")
+def api_save_skill(payload: dict):
+    label = str(payload.get("label") or "").strip()[:60]
+    category = str(payload.get("category") or "Custom").strip()[:40]
+    prompt = str(payload.get("prompt") or "").strip()
+    if not label or not prompt:
+        return {"ok": False, "error": "Both label and prompt are required."}
+    sid = str(payload.get("id") or re.sub(r"[^a-zA-Z0-9_-]", "_", label.lower()) + "_" + str(int(time.time()))[-4:])
+    skills = load_custom_skills()
+    replaced = False
+    for i, s in enumerate(skills):
+        if s.get("id") == sid:
+            skills[i] = {"id": sid, "category": category, "label": label, "prompt": prompt}
+            replaced = True
+            break
+    if not replaced:
+        skills.append({"id": sid, "category": category, "label": label, "prompt": prompt})
+    save_custom_skills(skills)
+    return {"ok": True, "skills": skills}
+
+@app.post("/api/skills/delete")
+def api_delete_skill(payload: dict):
+    sid = str(payload.get("id") or "").strip()
+    skills = [s for s in load_custom_skills() if s.get("id") != sid]
+    save_custom_skills(skills)
+    return {"ok": True, "skills": skills}
+
+TELEGRAM_STICKER_TURNS_SINCE = {}
+
+def load_telegram_stickers() -> dict:
+    default_obj = {"enabled": True, "cooldown_turns": 3, "stickers": []}
+    if STICKERS_PATH.exists():
+        try:
+            data = json.loads(STICKERS_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                default_obj.update(data)
+        except Exception:
+            pass
+    return default_obj
+
+def save_telegram_stickers(obj: dict):
+    STICKERS_PATH.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
+
+def get_telegram_sticker_prompt_hint() -> str:
+    st = load_telegram_stickers()
+    if not st.get("enabled", True):
+        return ""
+    items = [s for s in (st.get("stickers") or []) if s.get("enabled", True) and s.get("mood") and s.get("file_id")]
+    if not items:
+        return ""
+    moods = sorted(list({str(s["mood"]).strip().lower() for s in items}))[:18]
+    return (
+        f"\n[TELEGRAM STICKERS — USE SPARINGLY]: Available reaction moods: {', '.join(moods)}. "
+        "Only append [[STICKER:mood]] at the very end when a joke, reaction, or emotional beat genuinely merits it—never spam stickers on routine replies."
+    )
+
+def extract_and_throttle_sticker(reply_text: str, chat_id: str) -> tuple:
+    m = re.search(r"\[\[STICKER:([^\]]+)\]\]", reply_text or "", flags=re.IGNORECASE)
+    cleaned = re.sub(r"\[\[STICKER:[^\]]+\]\]", "", reply_text or "", flags=re.IGNORECASE).strip()
+    st = load_telegram_stickers()
+    cooldown = int(st.get("cooldown_turns", 3) or 0)
+    turns_since = int(TELEGRAM_STICKER_TURNS_SINCE.get(chat_id, 99))
+    if not m or not st.get("enabled", True) or cooldown <= 0:
+        TELEGRAM_STICKER_TURNS_SINCE[chat_id] = turns_since + 1
+        return cleaned, ""
+    if turns_since < cooldown:
+        TELEGRAM_STICKER_TURNS_SINCE[chat_id] = turns_since + 1
+        return cleaned, ""
+    want_mood = m.group(1).strip().lower()
+    cands = [s for s in (st.get("stickers") or []) if s.get("enabled", True) and s.get("file_id") and want_mood in str(s.get("mood", "")).lower()]
+    if not cands:
+        TELEGRAM_STICKER_TURNS_SINCE[chat_id] = turns_since + 1
+        return cleaned, ""
+    import random
+    chosen = random.choice(cands)
+    TELEGRAM_STICKER_TURNS_SINCE[chat_id] = 0
+    return cleaned, str(chosen["file_id"])
+
+@app.post("/api/telegram/test")
+def api_telegram_test(payload: dict):
+    token = str(payload.get("bot_token") or (WORKSPACE_CFG.get("telegram") or {}).get("bot_token") or "").strip()
+    if not token:
+        return {"ok": False, "error": "Paste your @BotFather token first."}
+    if STATE.get("offline_mode"):
+        return {"ok": False, "error": "Offline Mode is ON."}
+    res = _tg_api_post(token, "getMe", {}, timeout=10)
+    if res.get("ok") and isinstance(res.get("result"), dict):
+        me = res["result"]
+        return {"ok": True, "bot_id": me.get("id"), "username": me.get("username") or "", "first_name": me.get("first_name") or "", "message": f"Connected to @{me.get('username')} ({me.get('first_name')})!"}
+    return {"ok": False, "error": res.get("text") or res.get("error") or "Invalid Telegram Bot Token."}
+
+@app.post("/api/telegram/detect_id")
+def api_telegram_detect_id(payload: dict):
+    STATE["telegram_detect_until"] = time.time() + 90.0
+    STATE["telegram_detected_chat_id"] = ""
+    token = str(payload.get("bot_token") or (WORKSPACE_CFG.get("telegram") or {}).get("bot_token") or "").strip()
+    if token and not bool((WORKSPACE_CFG.get("telegram") or {}).get("enabled")):
+        try:
+            r = requests.get(f"https://api.telegram.org/bot{token}/getUpdates", params={"limit": 5, "timeout": 1}, timeout=6)
+            if r.status_code == 200:
+                ups = (r.json() or {}).get("result") or []
+                for u in reversed(ups):
+                    m = u.get("message") or u.get("edited_message") or {}
+                    cid = str((m.get("chat") or {}).get("id") or "")
+                    if cid:
+                        STATE["telegram_detected_chat_id"] = cid
+                        return {"ok": True, "chat_id": cid, "message": f"Detected your Chat ID: {cid}"}
+        except Exception:
+            pass
+    return {"ok": True, "chat_id": STATE.get("telegram_detected_chat_id", ""), "listening": True, "message": "Listening! Send /start to your bot in Telegram now."}
+
+@app.get("/api/telegram/stickers")
+def api_tg_get_stickers():
+    return {"ok": True, "config": load_telegram_stickers(), "capture_mood": STATE.get("telegram_sticker_capture_mood", "")}
+
+@app.post("/api/telegram/stickers/save")
+def api_tg_save_stickers(payload: dict):
+    st = load_telegram_stickers()
+    if "enabled" in payload:
+        st["enabled"] = bool(payload["enabled"])
+    if "cooldown_turns" in payload:
+        st["cooldown_turns"] = max(0, min(20, int(payload["cooldown_turns"])))
+    if isinstance(payload.get("stickers"), list):
+        cleaned = []
+        for item in payload["stickers"][:120]:
+            if isinstance(item, dict) and str(item.get("file_id") or "").strip():
+                cleaned.append({
+                    "file_id": str(item["file_id"]).strip(),
+                    "mood": str(item.get("mood") or "vibe").strip()[:32],
+                    "emoji": str(item.get("emoji") or "✨")[:8],
+                    "pack": str(item.get("pack") or "custom")[:48],
+                    "enabled": bool(item.get("enabled", True)),
+                })
+        st["stickers"] = cleaned
+    save_telegram_stickers(st)
+    return {"ok": True, "config": st}
+
+@app.post("/api/telegram/stickers/import_pack")
+def api_tg_import_sticker_pack(payload: dict):
+    raw_pack = str(payload.get("pack") or "").strip()
+    m = re.search(r"addstickers/([A-Za-z0-9_]+)", raw_pack)
+    pack_name = m.group(1) if m else re.sub(r"[^A-Za-z0-9_]", "", raw_pack)
+    token = str(payload.get("bot_token") or (WORKSPACE_CFG.get("telegram") or {}).get("bot_token") or "").strip()
+    if not token:
+        return {"ok": False, "error": "Save or enter your Telegram Bot Token first."}
+    if not pack_name:
+        return {"ok": False, "error": "Paste a t.me/addstickers/<PackName> link or pack name."}
+    res = _tg_api_post(token, "getStickerSet", {"name": pack_name}, timeout=15)
+    if not res.get("ok"):
+        return {"ok": False, "error": res.get("text") or res.get("error") or f"Could not load sticker pack '{pack_name}'."}
+    emoji_mood_map = {
+        "😂": "laugh", "🤣": "laugh", "😆": "laugh", "😏": "smug", "😎": "cool",
+        "🤦": "facepalm", "🙄": "eyeroll", "😴": "tired", "🥱": "tired", "❤️": "heart",
+        "🔥": "hype", "🎉": "hype", "😢": "sad", "😭": "sad", "😠": "angry",
+        "😡": "angry", "😱": "shocked", "🤔": "thinking", "👍": "approve", "💀": "dead",
+    }
+    st = load_telegram_stickers()
+    existing_ids = {s.get("file_id") for s in (st.get("stickers") or [])}
+    added = 0
+    for stk in ((res.get("result") or {}).get("stickers") or [])[:40]:
+        fid = str(stk.get("file_id") or "").strip()
+        em = str(stk.get("emoji") or "✨").strip()
+        if not fid or fid in existing_ids:
+            continue
+        mood = emoji_mood_map.get(em, f"react_{added+1}")
+        st["stickers"].append({"file_id": fid, "mood": mood, "emoji": em, "pack": pack_name, "enabled": True})
+        existing_ids.add(fid)
+        added += 1
+    save_telegram_stickers(st)
+    return {"ok": True, "added": added, "pack": pack_name, "config": st, "message": f"Imported {added} sticker(s) from '{pack_name}'!"}
+
+@app.post("/api/telegram/stickers/capture_mode")
+def api_tg_sticker_capture_mode(payload: dict):
+    mood = str(payload.get("mood") or "").strip()[:32]
+    STATE["telegram_sticker_capture_mood"] = mood
+    return {"ok": True, "capture_mood": mood}
+
+@app.post("/api/telegram/fork_session")
+def api_telegram_fork_session(payload: dict):
+    src_id = str(payload.get("session_id") or "").strip()
+    if not src_id:
+        raise HTTPException(400, "Missing session_id")
+    new_id = f"session_fork_{int(time.time())}"
+    with get_db() as conn:
+        srow = conn.execute("SELECT title FROM chat_sessions WHERE id = ?", (src_id,)).fetchone()
+        base_title = (srow["title"] if srow else src_id).replace("📱 ", "").strip()
+        new_title = f"↗️ {base_title}"[:58]
+        conn.execute("INSERT INTO chat_sessions (id, title) VALUES (?, ?)", (new_id, new_title))
+        rows = conn.execute("SELECT role, content, COALESCE(thought_trace, '') AS tt FROM chat_messages WHERE session_id = ? ORDER BY id ASC", (src_id,)).fetchall()
+        for r in rows:
+            conn.execute("INSERT INTO chat_messages (session_id, role, content, thought_trace) VALUES (?, ?, ?, ?)", (new_id, r["role"], r["content"], r["tt"]))
+        conn.commit()
+    export_chats_to_txt_files()
+    return {"ok": True, "session_id": new_id, "title": new_title, "copied_messages": len(rows)}
+
+@app.get("/api/cloud_files/roots")
+def api_cloud_files_roots():
+    return {
+        "ok": True,
+        "enabled": bool((WORKSPACE_CFG.get("vault_cloud") or {}).get("enabled", True)),
+        "roots": avs_cloud_files.get_cloud_roots(BASE_DIR, WORKSPACE_CFG),
+        "dlna": DLNA_SERVER.status(),
+        "lan_url": f"http://{get_local_lan_ip()}:{SERVER_PORT}",
+    }
+
+@app.post("/api/cloud_files/roots/add")
+def api_cloud_files_add_root(payload: dict):
+    raw_p = str(payload.get("path") or "").strip()
+    if not raw_p:
+        return {"ok": False, "error": "Provide a folder path."}
+    p = Path(raw_p).expanduser()
+    if not p.exists() or not p.is_dir():
+        return {"ok": False, "error": f"Folder not found: '{raw_p}'"}
+    vc = WORKSPACE_CFG.setdefault("vault_cloud", {"enabled": True, "dlna_enabled": False, "dlna_name": "AetherVault Media", "custom_roots": []})
+    c_roots = list(vc.get("custom_roots") or [])
+    rid = re.sub(r"[^a-zA-Z0-9_-]", "_", p.name.lower()).strip("_") or f"drive_{int(time.time())}"
+    if any(r.get("id") == rid for r in c_roots):
+        rid = f"{rid}_{int(time.time()) % 1000}"
+    c_roots.append({
+        "id": rid,
+        "label": str(payload.get("label") or p.name or raw_p)[:48],
+        "icon": str(payload.get("icon") or "💾"),
+        "path": str(p.resolve()),
+        "cloud": bool(payload.get("cloud", True)),
+        "dlna": bool(payload.get("dlna", True)),
+    })
+    vc["custom_roots"] = c_roots
+    save_workspace_config(WORKSPACE_CFG)
+    return {"ok": True, "roots": avs_cloud_files.get_cloud_roots(BASE_DIR, WORKSPACE_CFG)}
+
+@app.post("/api/cloud_files/roots/toggle")
+def api_cloud_files_toggle_root(payload: dict):
+    rid = str(payload.get("id") or "").strip()
+    vc = WORKSPACE_CFG.setdefault("vault_cloud", {"enabled": True, "dlna_enabled": False, "dlna_name": "AetherVault Media", "custom_roots": []})
+    for r in (vc.get("custom_roots") or []):
+        if r.get("id") == rid:
+            if "cloud" in payload:
+                r["cloud"] = bool(payload["cloud"])
+            if "dlna" in payload:
+                r["dlna"] = bool(payload["dlna"])
+    save_workspace_config(WORKSPACE_CFG)
+    return {"ok": True, "roots": avs_cloud_files.get_cloud_roots(BASE_DIR, WORKSPACE_CFG)}
+
+@app.post("/api/cloud_files/roots/remove")
+def api_cloud_files_remove_root(payload: dict):
+    rid = str(payload.get("id") or "").strip()
+    vc = WORKSPACE_CFG.setdefault("vault_cloud", {"enabled": True, "dlna_enabled": False, "dlna_name": "AetherVault Media", "custom_roots": []})
+    vc["custom_roots"] = [r for r in (vc.get("custom_roots") or []) if r.get("id") != rid]
+    save_workspace_config(WORKSPACE_CFG)
+    return {"ok": True, "roots": avs_cloud_files.get_cloud_roots(BASE_DIR, WORKSPACE_CFG)}
+
+@app.get("/api/cloud_files/list")
+def api_cloud_files_list(root_id: str = "vault_files", path: str = "", search: str = ""):
+    if not bool((WORKSPACE_CFG.get("vault_cloud") or {}).get("enabled", True)):
+        return {"ok": False, "error": "Vault Cloud File Server is toggled OFF."}
+    return avs_cloud_files.list_directory(BASE_DIR, WORKSPACE_CFG, root_id=root_id, rel_path=path, search=search)
+
+@app.post("/api/cloud_files/mkdir")
+def api_cloud_files_mkdir(payload: dict):
+    root_id = str(payload.get("root_id") or "vault_files")
+    rel = str(payload.get("rel_path") or "")
+    folder_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(payload.get("name") or "").strip()).strip(" .")
+    if not folder_name:
+        return {"ok": False, "error": "Folder name required."}
+    _, target, err = avs_cloud_files.resolve_root_path(BASE_DIR, WORKSPACE_CFG, root_id, f"{rel}/{folder_name}".strip("/"))
+    if err or not target:
+        return {"ok": False, "error": err or "Invalid path"}
+    target.mkdir(parents=True, exist_ok=True)
+    return {"ok": True, "path": str(target)}
+
+@app.post("/api/cloud_files/rename")
+def api_cloud_files_rename(payload: dict):
+    root_id = str(payload.get("root_id") or "vault_files")
+    rel = str(payload.get("rel_path") or "")
+    new_name = Path(str(payload.get("new_name") or "").strip()).name
+    if not new_name:
+        return {"ok": False, "error": "New name required."}
+    _, target, err = avs_cloud_files.resolve_root_path(BASE_DIR, WORKSPACE_CFG, root_id, rel)
+    if err or not target or not target.exists():
+        return {"ok": False, "error": err or "File not found"}
+    dst = target.with_name(new_name)
+    target.rename(dst)
+    if root_id == "priority_pdfs":
+        sync_priority_files(force=True)
+    return {"ok": True, "new_name": new_name}
+
+@app.post("/api/cloud_files/delete")
+def api_cloud_files_delete(payload: dict):
+    root_id = str(payload.get("root_id") or "vault_files")
+    rel = str(payload.get("rel_path") or "")
+    _, target, err = avs_cloud_files.resolve_root_path(BASE_DIR, WORKSPACE_CFG, root_id, rel)
+    if err or not target or not target.exists():
+        return {"ok": False, "error": err or "File not found"}
+    res = avs_fs_ops.trash_path(str(target), BASE_DIR, PROTECTED_CORE_FILES)
+    if root_id == "priority_pdfs":
+        sync_priority_files(force=True)
+    return res
+
+@app.post("/api/cloud_files/upload")
+async def api_cloud_files_upload(request: Request, root_id: str = "vault_files", rel_path: str = "", file: UploadFile = File(...)):
+    _, parent_dir, err = avs_cloud_files.resolve_root_path(BASE_DIR, WORKSPACE_CFG, root_id, rel_path)
+    if err or not parent_dir:
+        raise HTTPException(400, err or "Invalid destination")
+    parent_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", Path(file.filename or f"upload_{int(time.time())}").name).strip(" .")
+    dest = (parent_dir / safe_name).resolve()
+    if parent_dir.resolve() not in dest.parents:
+        raise HTTPException(400, "Invalid filename")
+    written = 0
+    with open(dest, "wb") as out_f:
+        while True:
+            chunk = await file.read(512 * 1024)
+            if not chunk:
+                break
+            out_f.write(chunk)
+            written += len(chunk)
+    if root_id == "priority_pdfs":
+        sync_priority_files(force=True)
+    return {"ok": True, "filename": safe_name, "bytes": written}
+
+@app.post("/api/cloud_files/to_lore")
+def api_cloud_files_to_lore(payload: dict):
+    root_id = str(payload.get("root_id") or "vault_files")
+    rel = str(payload.get("rel_path") or "")
+    mode = "core" if str(payload.get("mode") or "lore").lower() == "core" else "lore"
+    _, src, err = avs_cloud_files.resolve_root_path(BASE_DIR, WORKSPACE_CFG, root_id, rel)
+    if err or not src or not src.is_file():
+        return {"ok": False, "error": err or "File not found"}
+    if src.suffix.lower() not in avs_cloud_files.LORE_EXTS:
+        return {"ok": False, "error": "Only .pdf, .md, and .txt files can be pinned to Core/Lore."}
+    if root_id != "priority_pdfs":
+        dest = PDF_DIR / src.name
+        shutil.copy2(src, dest)
+        rel_pdf = src.name
+    else:
+        rel_pdf = src.relative_to(PDF_DIR.resolve()).as_posix()
+    sync_priority_files(force=True)
+    with get_db() as conn:
+        conn.execute("UPDATE priority_pdfs SET file_mode = ?, manual_override = 1 WHERE filename = ?", (mode, rel_pdf))
+        conn.commit()
+    sync_priority_files(force=True)
+    return {"ok": True, "filename": rel_pdf, "mode": mode}
+
+@app.get("/cloud/stream/{root_id}/{rel_path:path}")
+def stream_cloud_file(root_id: str, rel_path: str, request: Request, download: int = 0):
+    _, target, err = avs_cloud_files.resolve_root_path(BASE_DIR, WORKSPACE_CFG, root_id, rel_path)
+    if err or not target or not target.is_file():
+        raise HTTPException(404, err or "File not found")
+    file_size = target.stat().st_size
+    mime = avs_cloud_files.guess_mime(target)
+    headers = {"Accept-Ranges": "bytes", "Cache-Control": "no-cache"}
+    if download:
+        headers["Content-Disposition"] = f'attachment; filename="{target.name}"'
+    range_hdr = request.headers.get("range") or request.headers.get("Range") or ""
+    if range_hdr:
+        rng = avs_cloud_files.parse_byte_range(range_hdr, file_size)
+        if rng is None:
+            raise HTTPException(416, "Requested Range Not Satisfiable")
+        start, end = rng
+        headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+        headers["Content-Length"] = str((end - start) + 1)
+        return StreamingResponse(avs_cloud_files.iter_file_range(target, start, end), status_code=206, media_type=mime, headers=headers)
+    headers["Content-Length"] = str(file_size)
+    return StreamingResponse(avs_cloud_files.iter_file_range(target, 0, max(0, file_size - 1)), status_code=200, media_type=mime, headers=headers)
+
+@app.get("/cloud/playlist.m3u")
+def serve_cloud_m3u(root_id: str = ""):
+    base_u = f"http://{get_local_lan_ip()}:{SERVER_PORT}"
+    body = avs_cloud_files.build_m3u_playlist(BASE_DIR, WORKSPACE_CFG, base_u, root_id=root_id)
+    return StreamingResponse(
+        io.BytesIO(body.encode("utf-8")),
+        media_type="audio/x-mpegurl; charset=utf-8",
+        headers={"Content-Disposition": 'inline; filename="AetherVault_Media.m3u"'},
+    )
+
+@app.get("/api/dlna/status")
+def api_dlna_status():
+    return {"ok": True, "dlna": DLNA_SERVER.status(), "cloud_enabled": bool((WORKSPACE_CFG.get("vault_cloud") or {}).get("enabled", True))}
+
+@app.post("/api/dlna/toggle")
+def api_dlna_toggle(payload: dict):
+    vc = WORKSPACE_CFG.setdefault("vault_cloud", {"enabled": True, "dlna_enabled": False, "dlna_name": "AetherVault Media", "custom_roots": []})
+    if "cloud_enabled" in payload:
+        vc["enabled"] = bool(payload["cloud_enabled"])
+    if "dlna_name" in payload and str(payload["dlna_name"]).strip():
+        vc["dlna_name"] = str(payload["dlna_name"]).strip()[:48]
+    if "dlna_enabled" in payload:
+        en = bool(payload["dlna_enabled"])
+        vc["dlna_enabled"] = en
+        if en:
+            DLNA_SERVER.start(vc["dlna_name"])
+        else:
+            DLNA_SERVER.stop()
+    save_workspace_config(WORKSPACE_CFG)
+    return {"ok": True, "dlna": DLNA_SERVER.status(), "cloud_enabled": bool(vc["enabled"])}
+
+@app.get("/dlna/device.xml")
+def dlna_device_xml():
+    return HTMLResponse(content=DLNA_SERVER.build_device_xml(), media_type="text/xml; charset=utf-8")
+
+@app.get("/dlna/cds.xml")
+def dlna_cds_xml():
+    return HTMLResponse(content=DLNA_SERVER.build_cds_scpd_xml(), media_type="text/xml; charset=utf-8")
+
+@app.post("/dlna/control")
+async def dlna_control_soap(request: Request):
+    body_bytes = await request.body()
+    soap_act = request.headers.get("soapaction") or request.headers.get("SOAPACTION") or ""
+    base_u = f"http://{get_local_lan_ip()}:{SERVER_PORT}"
+    xml_out = DLNA_SERVER.handle_soap_action(soap_act, body_bytes.decode("utf-8", errors="ignore"), base_u)
+    return HTMLResponse(content=xml_out, media_type="text/xml; charset=utf-8")
+
+TELEGRAM_ACTIVE_THREADS = {}
+
+def _tg_get_active_session(chat_id: str) -> str:
+    sid = TELEGRAM_ACTIVE_THREADS.get(chat_id)
+    if sid:
+        return sid
+    sid = f"telegram_{chat_id}"
+    TELEGRAM_ACTIVE_THREADS[chat_id] = sid
+    return sid
+
+def _tg_list_chat_threads(chat_id: str) -> list:
+    prefix = f"telegram_{chat_id}"
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, title, updated_at FROM chat_sessions WHERE id = ? OR id LIKE ? ORDER BY updated_at DESC",
+            (prefix, f"{prefix}_%"),
+        ).fetchall()
+    out = [{"id": r["id"], "title": r["title"] or r["id"]} for r in rows]
+    if not out:
+        out = [{"id": prefix, "title": "📱 Telegram Main Chat"}]
+    return out
+
+def _tg_build_argo_panel(chat_id: str, view: str = "chats", page: int = 1) -> tuple:
+    ai_n = WORKSPACE_CFG.get("ai_name", "Aether")
+    lan_u = f"http://{get_local_lan_ip()}:{SERVER_PORT}"
+    dlna_on = DLNA_SERVER.running
+    cloud_on = bool((WORKSPACE_CFG.get("vault_cloud") or {}).get("enabled", True))
+    ws_mode = WORKSPACE_CFG.get("workspace_mode", "assistant")
+    active_sid = _tg_get_active_session(chat_id)
+
+    icon_row = [
+        {"text": "💬", "callback_data": "argo:chats:1"},
+        {"text": "📺", "callback_data": "argo:toggle_dlna"},
+        {"text": "☁️", "callback_data": "argo:toggle_cloud"},
+        {"text": "🎵", "callback_data": "avs_tool:spotify_current"},
+        {"text": "📸", "callback_data": "avs_tool:screenshot"},
+        {"text": "🎭", "callback_data": "argo:toggle_mode"},
+        {"text": "📊", "callback_data": "avs_cmd:/status"},
+    ]
+
+    threads = _tg_list_chat_threads(chat_id)
+    per_page = 6
+    total_pages = max(1, (len(threads) + per_page - 1) // per_page)
+    page = max(1, min(total_pages, int(page)))
+    sliced = threads[(page - 1) * per_page : page * per_page]
+
+    lines = [
+        f"⚡ {ai_n} • Quick Hub (v{APP_VERSION})",
+        f"• Chat ID: {chat_id} | Mode: {'🛠️ Assistant' if ws_mode == 'assistant' else '🎭 Roleplay'}",
+        f"• 📺 DLNA: {'ON' if dlna_on else 'OFF'} | ☁️ Cloud: {'ON' if cloud_on else 'OFF'}",
+        f"• 📱 Wi-Fi: {lan_u}",
+        "",
+        "💬 Telegram Chats (tap below to switch):",
+    ]
+    kb_rows = []
+    chat_btns = []
+    for idx_t, th in enumerate(sliced, 1):
+        mark = "🟢 " if th["id"] == active_sid else "▫️ "
+        short_t = th["title"].replace("📱 ", "")[:24]
+        lines.append(f"{mark}{idx_t}. {short_t}")
+        chat_btns.append({"text": f"{'✓ ' if th['id'] == active_sid else ''}{idx_t}. {short_t[:14]}", "callback_data": f"argo:pick:{th['id']}"})
+        if len(chat_btns) == 2:
+            kb_rows.append(chat_btns)
+            chat_btns = []
+    if chat_btns:
+        kb_rows.append(chat_btns)
+
+    lines.append(f"\n👇 Tap an icon or chat [Page {page}/{total_pages}]")
+    kb_rows.append(icon_row)
+    nav_row = [{"text": "🆕 New", "callback_data": "argo:new"}]
+    if page > 1:
+        nav_row.append({"text": "⬅️ Prev", "callback_data": f"argo:chats:{page-1}"})
+    nav_row.append({"text": "💤 Unload", "callback_data": "avs_cmd:/unload"})
+    if page < total_pages:
+        nav_row.append({"text": "➡️ Next", "callback_data": f"argo:chats:{page+1}"})
+    else:
+        nav_row.append({"text": "🔄 Update", "callback_data": "avs_cmd:/update"})
+    kb_rows.append(nav_row)
+
+    miniapp_url = (WORKSPACE_CFG.get("telegram", {}).get("miniapp_url") or "").strip()
+    if miniapp_url.startswith("https://"):
+        kb_rows.append([{"text": "🚀 Open Studio Mini App", "web_app": {"url": miniapp_url}}])
+    return "\n".join(lines), {"inline_keyboard": kb_rows}
+
+
+class _TelegramChatActionHeartbeat:
+    def __init__(self, token: str, chat_id: str, action: str = "typing"):
+        self.token = token
+        self.chat_id = chat_id
+        self.action = action
+        self._stop = threading.Event()
+        self._th = threading.Thread(target=self._loop, daemon=True)
+
+    def set_action(self, action: str):
+        if action in ("typing", "upload_photo", "upload_document", "record_voice"):
+            self.action = action
+
+    def start(self):
+        self._th.start()
+        return self
+
+    def stop(self):
+        self._stop.set()
+
+    def _loop(self):
+        while not self._stop.is_set():
+            _tg_api_post(self.token, "sendChatAction", {"chat_id": self.chat_id, "action": self.action}, timeout=5)
+            self._stop.wait(4.0)
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=SERVER_PORT)

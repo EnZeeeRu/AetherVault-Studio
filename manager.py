@@ -477,9 +477,9 @@ def set_configured_github_repo(repo_slug: str, log_fn=print):
     log_fn(f"[GITHUB] Linked repository -> '{slug or '(none)'}'")
 
 
-OTA_TEXT_EXTS = {".py", ".html", ".json", ".md", ".svg", ".sh", ".bat", ".txt", ".gitattributes"}
+OTA_TEXT_EXTS = {".py", ".html", ".css", ".js", ".json", ".md", ".svg", ".sh", ".bat", ".txt", ".gitattributes"}
 OTA_ROOT_FILES = {
-    "assistant_server.py", "ui_studio.html", "aethervault_logo.svg",
+    "assistant_server.py", "ui_studio.html", "aethervault_logo.svg", "release_emblem.svg",
     "AetherVault_Studio_Manual.pdf", "README.md", "manifest.json",
     ".gitattributes", "Launch.bat", "Launch.sh", "manager.py"
 }
@@ -760,6 +760,7 @@ REQUIRED_RUNTIME_FILES = (
     "assistant_server.py",
     "ui_studio.html",
     "aethervault_logo.svg",
+    "release_emblem.svg",
     "AetherVault_Studio_Manual.pdf",
     "locales/en.json",
     "locales/es.json",
@@ -777,6 +778,16 @@ REQUIRED_RUNTIME_FILES = (
     "avs/model_polish.py",
     "avs/language_tools.py",
     "avs/manual_assets.py",
+    "avs/cloud_sync.py",
+    "avs/cloud_files.py",
+    "avs/dlna_server.py",
+    "avs/fs_ops.py",
+    "avs/introspect.py",
+    "avs/ui/studio.css",
+    "avs/ui/media.js",
+    "avs/ui/composer.js",
+    "avs/ui/cloud.js",
+    "avs/ui/telegram.js",
 )
 
 
@@ -1060,6 +1071,8 @@ def launch_desktop_gui(snap_info: str) -> bool:
                 "  /specs                       Deep SpecPulse hardware specs (64-bit VRAM, CPU, RAM)\n"
                 "  /pip <pkg>                   Install any custom PyPI package into .venv\n"
                 "  /repo <user/repo>            Link GitHub repo for 1-click OTA updates\n"
+                "  /dlna [on|off]               Toggle DLNA/UPnP Media Server (Roku TV & VLC)\n"
+                "  /cloud [on|off]              Toggle Vault Cloud LAN File Server\n"
                 "  /update                      Pull latest core files from GitHub (preserves user data)\n"
                 "  /restart                     Stop & relaunch assistant_server.py"
             )
@@ -1114,6 +1127,12 @@ def launch_desktop_gui(snap_info: str) -> bool:
                     f"Step: {st.get('current_step')}"
                 )
             run_bg("Console /status", _st)
+        elif cmd == "/dlna":
+            val = arg.lower() in ("on", "true", "1", "start") if arg else True
+            run_bg("Console /dlna", lambda: ui_log(f"[DLNA] {_api_req('POST', '/api/dlna/toggle', {'dlna_enabled': val})}"))
+        elif cmd == "/cloud":
+            val = arg.lower() in ("on", "true", "1", "start") if arg else True
+            run_bg("Console /cloud", lambda: ui_log(f"[CLOUD] {_api_req('POST', '/api/dlna/toggle', {'cloud_enabled': val})}"))
         elif cmd == "/stop":
             run_bg("Console /stop", lambda: ui_log(f"[STOP] {_api_req('POST', '/stop_generation', {})}"))
         elif cmd == "/inject":

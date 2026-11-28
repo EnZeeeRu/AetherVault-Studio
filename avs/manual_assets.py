@@ -20,7 +20,7 @@ SVG_ARCHITECTURE = """<svg viewBox="0 0 720 205" width="100%" xmlns="http://www.
     </linearGradient>
   </defs>
   <rect x="2" y="2" width="716" height="201" rx="12" fill="url(#bgGrad1)" stroke="#2e334d" stroke-width="1.5"/>
-  <text x="20" y="26" fill="#a78bfa" font-family="Segoe UI,system-ui,sans-serif" font-size="11" font-weight="700" letter-spacing="1.2">AETHERVAULT STUDIO v6.8 BLUESKY :: 3-LAYER PORTABLE ARCHITECTURE</text>
+  <text x="20" y="26" fill="#a78bfa" font-family="Segoe UI,system-ui,sans-serif" font-size="11" font-weight="700" letter-spacing="1.2">AETHERVAULT STUDIO v7.1 LAMPPOST :: 3-LAYER PORTABLE ARCHITECTURE</text>
 
   <!-- Layer 1: Frozen Bootstrapper -->
   <rect x="18" y="42" width="196" height="142" rx="10" fill="#14182a" stroke="#7c3aed" stroke-width="1.5"/>
@@ -257,13 +257,13 @@ MANUAL_SECTIONS_EN = [
         "summary": "How the permanent 3-file bootstrapper, modular avs/ runtime, and portable local vaults fit together.",
         "svg": SVG_ARCHITECTURE,
         "body": (
-            "AetherVault Studio v6.8 Bluesky is a 100% portable, zero-footprint local AI, Python Workbench, AT Protocol bridge, and hardware telemetry workstation.\n"
+            "AetherVault Studio v7.1 Lamppost is a 100% portable, zero-footprint local AI, Python Workbench, AT Protocol bridge, and hardware telemetry workstation.\n"
             "FROZEN 3-FILE BOOTSTRAPPER (ENTRY LAYER):\n"
             "- Launch.bat (Windows) & Launch.sh (macOS/Linux): Detect Python 3.10+, offer automatic install (winget/brew/apt/dnf/pacman), and launch manager.py.\n"
             "- manager.py: Permanent Bootstrapper & Control Center (tkinter GUI + automatic CLI fallback). Dynamically reads runtime version from manifest.json, builds the isolated .venv, auto-hydrates missing runtime files on first boot, and pulls SHA-256-verified GitHub OTA updates without overwriting your frozen bootstrapper or personal data.\n"
-            "LIVE STUDIO RUNTIME & MODULAR avs/ PACKAGE (13 MODULES):\n"
+            "LIVE STUDIO RUNTIME & MODULAR avs/ PACKAGE (17 MODULES + avs/ui/):\n"
             "- assistant_server.py & ui_studio.html + locales/en.json & locales/es.json.\n"
-            "- avs/ modules: contracts, memory_graph, referee, tool_registry, bridges, turn_pipeline, model_polish, language_tools, manual_assets, platform_bridge, toolbox, workbench, hardware_monitor.\n"
+            "- avs/ modules: contracts, memory_graph, referee, tool_registry, bridges, turn_pipeline, model_polish, language_tools, manual_assets, cloud_sync, cloud_files, dlna_server, fs_ops, introspect, platform_bridge, toolbox, workbench, hardware_monitor + modular avs/ui/ (studio.css, media.js, composer.js, cloud.js, telegram.js).\n"
             "PORTABLE USER DATA (100% INCLUDED IN .ZIP EXPORT/IMPORT):\n"
             "- workspace_config.json, user_profile_card.json, memory_core.db, memory_vault/, priority_pdfs/, chat_logs/, models/ (GGUF + models/translate/ Argos packs), custom_tools/, custom_assets/, stock_vault/, and auto-purged .temp_cache/."
         ),
@@ -459,7 +459,7 @@ MANUAL_SECTIONS_ES = [
         "summary": "Cómo se conectan el lanzador permanente de 3 archivos, el runtime modular avs/ y tus bóvedas locales portables.",
         "svg": SVG_ARCHITECTURE,
         "body": (
-            "AetherVault Studio v6.8 Bluesky es una estación de trabajo 100% portable y sin rastros de IA local, Python Workbench, puente AT Protocol y telemetría de hardware.\n"
+            "AetherVault Studio v7.1 Lamppost es una estación de trabajo 100% portable y sin rastros de IA local, Python Workbench, puente AT Protocol y telemetría de hardware.\n"
             "BOOTSTRAPPER DE 3 ARCHIVOS (CAPA DE ENTRADA CONGELADA):\n"
             "- Launch.bat (Windows) y Launch.sh (macOS/Linux): Detectan Python 3.10+, ofrecen instalación automática y ejecutan manager.py.\n"
             "- manager.py: Centro de Control permanente (GUI tkinter + modo CLI automático). Lee la versión del runtime desde manifest.json, arma el entorno aislado .venv, auto-hidrata archivos faltantes al arrancar y descarga actualizaciones OTA verificadas con SHA-256 sin pisar tus datos personales.\n"
